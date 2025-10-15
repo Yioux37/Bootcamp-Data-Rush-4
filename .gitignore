@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# OS/IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Données brutes volumineuses (exclus par défaut)
+data/raw/
+*.csv
+*.parquet
+*.zip
