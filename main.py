@@ -15,6 +15,8 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.metrics import make_scorer, roc_auc_score, f1_score
+from sklearn.model_selection import GridSearchCV
 import matplotlib.pyplot as plt
 
 
@@ -30,21 +32,26 @@ data = data[~data['Year_Birth'].isin([1893, 1899, 1900])]
 median = data['Income'].median()
 data['Income'] = data['Income'].fillna(median)
 
-data['Age'] = 2015 - data['Year_Birth']
+data['Age'] = 2014 - data['Year_Birth']
 data['Is_Parent'] = ((data['Kidhome'] + data['Teenhome']) > 0).astype(int)
 
 totalSpent = ['MntWines', 'MntFruits', 'MntMeatProducts', 'MntFishProducts', 'MntSweetProducts', 'MntGoldProds']
 data['Total_Spent'] = data[totalSpent].sum(axis=1)
 
 data['Dt_Customer'] = pd.to_datetime(data['Dt_Customer'])
-data['Customer_Seniority'] = (pd.Timestamp.today() - data['Dt_Customer']).dt.days
+data['Customer_Seniority'] = (pd.Timestamp('2014-12-31') - data['Dt_Customer']).dt.days
 data = data.drop(columns=['Dt_Customer'])
 
 bins = [0, 25, 35, 50, 65, 100]
 groups = ['18-25', '26-35', '36-50', '51-65', '65+']
 data['Age_Group'] = pd.cut(data['Age'], bins=bins, labels=groups, right=False)
 
+accepted_cols = ['AcceptedCmp1', 'AcceptedCmp2', 'AcceptedCmp3', 'AcceptedCmp4', 'AcceptedCmp5']
+data['Total_Accepted_Campaigns'] = data[accepted_cols].sum(axis=1)  
 
+data['Has_Accepted_Before'] = (data['Total_Accepted_Campaigns'] > 0).astype(int)
+
+data.to_csv("csv/Cleaned_Camp_Market.csv", index=False)
 
 X = data.drop(columns=["Response"])
 y = data["Response"]
@@ -59,19 +66,38 @@ scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train_bal)
 X_test_scaled = scaler.transform(X_test)
 
-# Create the model
-# forest = RandomForestClassifier(
-#     n_estimators=200,      # number of trees (you can tune)
-#     max_depth=10,          # prevent overfitting
-#     random_state=42,
-#     n_jobs=-1              # use all CPU cores for speed
-# )
 
+rf = RandomForestClassifier(random_state=42, n_jobs=-1)
+
+
+
+param_grid = {
+    'n_estimators': [200, 400],          # keep 2 levels of complexity
+    'max_depth': [6, 8, 10, None],       # test shallow vs full
+    'min_samples_split': [2, 5],         # fine control on splits
+    'min_samples_leaf': [1, 5, 10],      # controls smoothness
+    'class_weight': [None, 'balanced', {0:1, 1:1.5}]  # 3 variants
+}
+
+grid_search = GridSearchCV(
+    estimator=rf,
+    param_grid=param_grid,
+    scoring='roc_auc',   # works natively with RandomForest
+    cv=3,                # 3 folds instead of 5 = faster
+    verbose=2,
+    n_jobs=-1
+)
+
+
+# grid_search.fit(X_train_scaled, y_train_bal)
+# print("🔥 Best parameters:", grid_search.best_params_)
+# print("💎 Best AUC:", grid_search.best_score_)
 forest = RandomForestClassifier(
     n_estimators=500,
-    max_depth=None,
-    min_samples_leaf=10,
-    class_weight={0:1, 1:1.5},
+    max_depth=25,        
+    min_samples_leaf=35,    
+    min_samples_split=2,
+    class_weight={0:1, 1:1.4},  
     random_state=42,
     n_jobs=-1
 )
@@ -80,17 +106,22 @@ forest.fit(X_train_scaled, y_train_bal)
 
 y_pred = forest.predict(X_test_scaled)
 y_pred_proba = forest.predict_proba(X_test_scaled)[:, 1]
-threshold = 0.35  # or whatever value you want
+threshold = 0.4 
 y_pred_adjusted = (y_pred_proba >= threshold).astype(int)
 
 auc = roc_auc_score(y_test, y_pred_adjusted)
-print(f"💖 AUC Score: {auc:.3f}")
+print(f"AUC Score: {auc:.3f}")
 
-print("🌲 Random Forest Results 🌲")
 print("Accuracy:", round(accuracy_score(y_test, y_pred_adjusted), 3))
 print("\nConfusion Matrix:\n", confusion_matrix(y_test, y_pred_adjusted))
 print("\nClassification Report:\n", classification_report(y_test, y_pred_adjusted))
 
+# feature_importances = pd.DataFrame({
+#     'Feature': X_train_bal.columns,
+#     'Importance': forest.feature_importances_
+# }).sort_values(by='Importance', ascending=False)
+
+# print(feature_importances.head(15))
 
 print("Before SMOTE:", y_train.value_counts())
 print("After SMOTE:", y_train_bal.value_counts())
@@ -102,25 +133,66 @@ import pandas as pd
 
 # Create 5 clients with real dataset columns
 new_clients = pd.DataFrame([
-    {"Year_Birth": 1988, "Education": "Graduation", "Marital_Status": "Single", "Income": 34000,
-     "Kidhome": 0, "Teenhome": 0, "Recency": 12, "MntWines": 50, "MntFruits": 5, "MntMeatProducts": 100,
-     "MntFishProducts": 15, "MntSweetProducts": 10, "MntGoldProds": 20},
-    
-    {"Year_Birth": 1975, "Education": "Master", "Marital_Status": "Married", "Income": 72000,
-     "Kidhome": 1, "Teenhome": 1, "Recency": 38, "MntWines": 400, "MntFruits": 20, "MntMeatProducts": 900,
-     "MntFishProducts": 70, "MntSweetProducts": 60, "MntGoldProds": 180},
-    
-    {"Year_Birth": 1968, "Education": "PhD", "Marital_Status": "Together", "Income": 95000,
-     "Kidhome": 0, "Teenhome": 0, "Recency": 25, "MntWines": 700, "MntFruits": 60, "MntMeatProducts": 1400,
-     "MntFishProducts": 90, "MntSweetProducts": 80, "MntGoldProds": 250},
-    
-    {"Year_Birth": 1993, "Education": "2n Cycle", "Marital_Status": "Single", "Income": 26000,
-     "Kidhome": 0, "Teenhome": 1, "Recency": 8, "MntWines": 20, "MntFruits": 2, "MntMeatProducts": 60,
-     "MntFishProducts": 5, "MntSweetProducts": 3, "MntGoldProds": 10},
-    
-    {"Year_Birth": 1982, "Education": "Graduation", "Marital_Status": "Married", "Income": 52000,
-     "Kidhome": 2, "Teenhome": 1, "Recency": 60, "MntWines": 200, "MntFruits": 25, "MntMeatProducts": 450,
-     "MntFishProducts": 35, "MntSweetProducts": 25, "MntGoldProds": 70}
+    {"Year_Birth": 1970, "Education": "PhD", "Marital_Status": "Married", "Income": 110000,
+     "Kidhome": 0, "Teenhome": 0, "Recency": 2,
+     "MntWines": 1200, "MntFruits": 100, "MntMeatProducts": 1500,
+     "MntFishProducts": 300, "MntSweetProducts": 250, "MntGoldProds": 400,
+     "Total_Accepted_Campaigns": 4},
+
+    {"Year_Birth": 1980, "Education": "Master", "Marital_Status": "Together", "Income": 95000,
+     "Kidhome": 1, "Teenhome": 0, "Recency": 5,
+     "MntWines": 900, "MntFruits": 80, "MntMeatProducts": 1100,
+     "MntFishProducts": 200, "MntSweetProducts": 120, "MntGoldProds": 250,
+     "Total_Accepted_Campaigns": 3},
+
+    {"Year_Birth": 1975, "Education": "Graduation", "Marital_Status": "Married", "Income": 88000,
+     "Kidhome": 2, "Teenhome": 0, "Recency": 4,
+     "MntWines": 800, "MntFruits": 70, "MntMeatProducts": 1000,
+     "MntFishProducts": 150, "MntSweetProducts": 110, "MntGoldProds": 200,
+     "Total_Accepted_Campaigns": 2},
+
+    {"Year_Birth": 1968, "Education": "PhD", "Marital_Status": "Married", "Income": 120000,
+     "Kidhome": 0, "Teenhome": 0, "Recency": 1,
+     "MntWines": 1500, "MntFruits": 150, "MntMeatProducts": 1800,
+     "MntFishProducts": 250, "MntSweetProducts": 300, "MntGoldProds": 500,
+     "Total_Accepted_Campaigns": 5},
+
+    {"Year_Birth": 1983, "Education": "Master", "Marital_Status": "Together", "Income": 98000,
+     "Kidhome": 1, "Teenhome": 1, "Recency": 3,
+     "MntWines": 1000, "MntFruits": 120, "MntMeatProducts": 1300,
+     "MntFishProducts": 220, "MntSweetProducts": 150, "MntGoldProds": 300,
+     "Total_Accepted_Campaigns": 3},
+
+    # 🔴 Extremely unlikely to respond
+    {"Year_Birth": 1998, "Education": "Basic", "Marital_Status": "Single", "Income": 12000,
+     "Kidhome": 0, "Teenhome": 0, "Recency": 90,
+     "MntWines": 5, "MntFruits": 2, "MntMeatProducts": 10,
+     "MntFishProducts": 1, "MntSweetProducts": 1, "MntGoldProds": 0,
+     "Total_Accepted_Campaigns": 0},
+
+    {"Year_Birth": 1989, "Education": "2n Cycle", "Marital_Status": "Single", "Income": 20000,
+     "Kidhome": 0, "Teenhome": 0, "Recency": 85,
+     "MntWines": 10, "MntFruits": 3, "MntMeatProducts": 15,
+     "MntFishProducts": 2, "MntSweetProducts": 1, "MntGoldProds": 0,
+     "Total_Accepted_Campaigns": 0},
+
+    {"Year_Birth": 1995, "Education": "Basic", "Marital_Status": "Single", "Income": 18000,
+     "Kidhome": 1, "Teenhome": 1, "Recency": 100,
+     "MntWines": 0, "MntFruits": 0, "MntMeatProducts": 5,
+     "MntFishProducts": 0, "MntSweetProducts": 0, "MntGoldProds": 0,
+     "Total_Accepted_Campaigns": 0},
+
+    {"Year_Birth": 1987, "Education": "Graduation", "Marital_Status": "Divorced", "Income": 25000,
+     "Kidhome": 2, "Teenhome": 1, "Recency": 70,
+     "MntWines": 15, "MntFruits": 2, "MntMeatProducts": 20,
+     "MntFishProducts": 5, "MntSweetProducts": 3, "MntGoldProds": 1,
+     "Total_Accepted_Campaigns": 0},
+
+    {"Year_Birth": 2000, "Education": "Basic", "Marital_Status": "Single", "Income": 10000,
+     "Kidhome": 0, "Teenhome": 0, "Recency": 95,
+     "MntWines": 0, "MntFruits": 0, "MntMeatProducts": 0,
+     "MntFishProducts": 0, "MntSweetProducts": 0, "MntGoldProds": 0,
+     "Total_Accepted_Campaigns": 0}
 ])
 
 new_clients['Age'] = 2015 - new_clients['Year_Birth']
@@ -132,14 +204,11 @@ new_clients = new_clients.reindex(columns=X_train_bal.columns, fill_value=0)
 
 new_clients_scaled = scaler.transform(new_clients)
 
-calibrated_forest = CalibratedClassifierCV(forest, method='isotonic', cv=5)
-calibrated_forest.fit(X_train_scaled, y_train_bal)
-
 predictions = forest.predict(new_clients_scaled)
 probabilities = forest.predict_proba(new_clients_scaled)[:, 1]
 
 results = pd.DataFrame({
-    "Client": [1, 2, 3, 4, 5],
+    "Client": range(1, 11),
     "Predicted_Response": predictions,
     "Response_Probability": probabilities
 })
