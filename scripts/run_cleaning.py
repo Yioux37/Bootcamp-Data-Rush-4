@@ -1,25 +1,34 @@
+#!/usr/bin/env python3
+# scripts/run_cleaning.py
 import argparse
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype  # <= correct
+from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype
 
-# Constantes 
-POS = {"yes","oui","true","t","1","accepted","converted","purchase","purchased","buy","bought","success","y"}
+# Constantes
+POS = {
+    "yes","oui","true","t","1","accepted","converted",
+    "purchase","purchased","buy","bought","success","y"
+}
 
 FR_ORDER = [
     "Identifiant","Année_naissance","Education","Situation_matrimoniale","Revenu",
     "Enfant_charge","Ado_charge","Date_acquisition_client","Nombre_jours_depuis_dernier_achat",
     "Montant_vin","Montant_fruits","Montant_viande","Montant_poisson","Montant_sucreries","Montant_luxe",
-    "Nb_achats_promo","Nb_achats_en_ligne","Achats_catalogue_binaire","Achats_magasin_binaire",
+    "Nb_achats_promo","Nb_achats_en_ligne","Achats_catalogue","Achats_magasin",
     "Nb_visites_web_mois",
     "Accepte_Campagne_3","Accepte_Campagne_4","Accepte_Campagne_5","Accepte_Campagne_1","Accepte_Campagne_2",
     "Reclamation_client","Z_CostContact","Z_Revenue","Response"
 ]
 
-# Utils 
+# Utils
 def bar(title: str, ch: str="═", width: int=70):
-    t = f" {title} "; n = max(0, width-len(t)); L=n//2; R=n-L; return f"{ch*L}{t}{ch*R}"
+    t = f" {title} "
+    n = max(0, width - len(t))
+    L = n // 2
+    R = n - L
+    return f"{ch*L}{t}{ch*R}"
 
 def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -30,7 +39,6 @@ def parse_dates(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for c in out.columns:
         if "date" in c or c.startswith("dt_"):
-            # retire infer_datetime_format (déprécié)
             out[c] = pd.to_datetime(out[c], errors="coerce", dayfirst=True)
     return out
 
@@ -41,7 +49,7 @@ def to_int01(s) -> pd.Series:
     sr = pd.to_numeric(s, errors="coerce").fillna(0).astype(int)
     return sr.clip(lower=0, upper=1)
 
-# Nettoyage (business rules) 
+# Nettoyage (règles métier)
 def clean_business_rules(df: pd.DataFrame):
     log = {}
     df = normalize_cols(df)
@@ -143,8 +151,9 @@ def to_french_schema(df: pd.DataFrame) -> pd.DataFrame:
         "Montant_luxe":                 to_num(df.get("mntgoldprods")).fillna(0).astype(float),
         "Nb_achats_promo":              to_num(df.get("numdealspurchases")).fillna(0).astype(int),
         "Nb_achats_en_ligne":           to_num(df.get("numwebpurchases")).fillna(0).astype(int),
-        "Achats_catalogue_binaire":     (to_num(df.get("numcatalogpurchases")).fillna(0) > 0).astype(int),
-        "Achats_magasin_binaire":       (to_num(df.get("numstorepurchases")).fillna(0)   > 0).astype(int),
+        # ← ICI : quantités, pas binaire
+        "Achats_catalogue":             to_num(df.get("numcatalogpurchases")).fillna(0).astype(int),
+        "Achats_magasin":               to_num(df.get("numstorepurchases")).fillna(0).astype(int),
         "Nb_visites_web_mois":          to_num(df.get("numwebvisitsmonth")).fillna(0).astype(int),
         "Accepte_Campagne_3":           to_int01(df.get("acceptedcmp3", 0)),
         "Accepte_Campagne_4":           to_int01(df.get("acceptedcmp4", 0)),
@@ -160,7 +169,7 @@ def to_french_schema(df: pd.DataFrame) -> pd.DataFrame:
     # ordre strict
     out = out[FR_ORDER]
 
-    # zéro NA garanti — via tests pandas (compatible Int64/Float64)
+    # zéro NA garanti
     for c in out.columns:
         if is_datetime64_any_dtype(out[c]):
             out[c] = out[c].fillna(pd.Timestamp("1970-01-01"))
@@ -172,7 +181,7 @@ def to_french_schema(df: pd.DataFrame) -> pd.DataFrame:
     assert not out.isna().any().any(), "Il reste des NA dans le schéma FR."
     return out
 
-# Rapport 
+# Rapport
 def quick_report(df: pd.DataFrame, log: dict, src: str, dst: Path):
     print(bar("RAPPORT DE NETTOYAGE", "█"))
     print(f"Source : {src}")
@@ -215,12 +224,12 @@ def quick_report(df: pd.DataFrame, log: dict, src: str, dst: Path):
 
     print("\n" + bar("FIN DU RAPPORT", "█"))
 
-# CLI 
+# CLI
 def main():
     ap = argparse.ArgumentParser(description="Nettoyage marketing → CSV (pas de Parquet)")
     ap.add_argument("--input", required=True, help="Chemin du CSV brut (séparateur ';')")
     ap.add_argument("--out", required=True, help="Chemin de sortie CSV propre (sera créé)")
-    ap.add_argument("--sep", default=";", help="Séparateur CSV (défaut: ;) ")
+    ap.add_argument("--sep", default=";", help="Séparateur CSV (défaut: ;)")
     ap.add_argument("--encoding", default="utf-8", help="Encodage (défaut: utf-8)")
     args = ap.parse_args()
 
