@@ -1,52 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-KPIs.py — Calcul de KPI marketing sur le fichier camp_market_clean.csv
-
-Sorties (dans --output, défaut: data/processed) :
-- kpis_summary.csv        : KPI globaux (campagne entière)
-- kpis_by_segment.csv     : KPI par segments (si --segments fourni)
-- kpis_optional.csv       : KPI complémentaires globaux
-- kpis_report.xlsx        : Excel avec toutes les feuilles ci-dessus
-
-Options utiles :
---input <fichier.csv>          : chemin du CSV (défaut: data/raw/camp_market_clean.csv)
---output <dossier>             : dossier de sortie (défaut: data/processed)
---campaign-cost <float>        : coût total de la campagne (pour CAC/ROI)
---margin <float>               : marge unitaire (0.3 = 30%), pour CLV (défaut 0.3)
---clv-years <int>              : horizon CLV en années (défaut 3)
---control-col <str>            : nom de la colonne Test/Control (pour uplift)
---segments <col1 col2 ...>     : colonnes de segmentation (ex: Education Situation_matrimoniale)
-
-Hypothèses raisonnables (adaptables si besoin) :
-- Recette (CA) client = somme des colonnes Montant_*.
-- Nb commandes client = Achats_catalogue + Achats_magasin + Nb_achats_en_ligne.
-- Acheteur = (CA>0) ou (Nb commandes>0).
-- Conversion = acheteurs / exposés (lignes du fichier).
-- Taux de réponse = moyenne de la colonne 'Response' si présente (sinon NaN).
-- AOV (Panier moyen) = CA total / nb commandes (si nb commandes > 0).
-- CLV ≈ AOV * fréquence annuelle * marge * horizon (fréquence annualisée depuis Date_acquisition_client).
-- Uplift : si --control-col est fourni et contient 2 groupes (ex: "Test", "Control"),
-  on calcule l’écart Test−Control sur Taux de réponse et Conversion.
-
-Le script est tolérant aux colonnes manquantes (remplace par NaN quand nécessaire).
-"""
-
-from __future__ import annotations
-
 import argparse
-import warnings
+import os
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
 import numpy as np
 import pandas as pd
 
 
-# Constantes : noms de colonnes attendues (tel que dans ton CSV)
-AMOUNT_COLS = [
+# =========
+# Aliases : harmonisation des noms réels -> noms attendus par le script
+# =========
+# On renomme le DataFrame pour que le reste du code utilise des noms "propres".
+COLUMN_ALIASES = {
+    # Achats / canaux
+    "Nb_achats_en_ligne": "Achats_en_ligne",
+    # (Ajouter d'autres alias si nécessaire)
+    # "Visites_web_mois": "Nb_visites_web_mois",
+    # "Date_client": "Date_acquisition_client",
+}
+
+# Colonnes des montants produits (utilisées pour Monetary et nb produits)
+PRODUCT_AMOUNT_COLS = [
     "Montant_vin",
     "Montant_fruits",
     "Montant_viande",
@@ -55,350 +30,289 @@ AMOUNT_COLS = [
     "Montant_luxe",
 ]
 
-ORDER_PARTS = [
+# Colonnes d’achats par canal
+PURCHASE_CHANNEL_COLS = [
+    "Achats_en_ligne",
     "Achats_catalogue",
     "Achats_magasin",
-    "Nb_achats_en_ligne",
 ]
 
-OPTIONAL_COLS = {
-    "response": "Response",
-    "recency_days": "Nombre_jours_depuis_dernier_achat",
-    "web_visits": "Nb_visites_web_mois",
-    "promo_orders": "Nb_achats_promo",
-    "acq_date": "Date_acquisition_client",
-    # colonnes d’acceptation de campagnes (si présentes dans ton fichier)
-    "acc3": "Accepte_Campagne_3",
-    "acc4": "Accepte_Campagne_4",
-    "acc5": "Accepte_Campagne_5",
-    "acc1": "Accepte_Campagne_1",
-    "acc2": "Accepte_Campagne_2",
-}
+# Quelques colonnes attendues pour des contrôles simples
+SOFT_REQUIRED_COLS = [
+    "Identifiant",
+    "Année_naissance",
+    "Education",
+    "Situation_matrimoniale",
+    "Revenu",
+    "Enfant_charge",
+    "Ado_charge",
+    "Date_acquisition_client",
+    "Nombre_jours_depuis_dernier_achat",
+    "Nb_visites_web_mois",
+    "Response",
+]
 
 
-# Fonctions utilitaires
-def safe_sum(df: pd.DataFrame, cols: List[str]) -> pd.Series:
-    """Somme des colonnes présentes uniquement (ignore celles manquantes)."""
-    present = [c for c in cols if c in df.columns]
-    if not present:
-        return pd.Series(np.nan, index=df.index)
-    return df[present].sum(axis=1, skipna=True)
-
-
-def safe_fillna(series: pd.Series, val: float = 0.0) -> pd.Series:
-    return series.fillna(val) if series is not None else series
-
-
-def parse_date_safe(s: pd.Series) -> pd.Series:
-    """Parse de dates tolérant (YYYY-mm-dd), retourne NaT quand impossible."""
-    try:
-        return pd.to_datetime(s, errors="coerce")
-    except Exception:
-        return pd.to_datetime(pd.Series([np.nan] * len(s)), errors="coerce")
-
-
-def annualize_frequency(orders: pd.Series, acq_date: pd.Series) -> pd.Series:
-    """
-    Approx. fréquence annuelle :
-    freq = nb_commandes / max(âge_client_en_années, 1/12)
-    """
-    now = pd.Timestamp(datetime.utcnow().date())
-    age_years = ((now - acq_date).dt.days / 365.25).clip(lower=1 / 12)  # évite division par 0
-    return (orders / age_years).replace([np.inf, -np.inf], np.nan)
-
-
-# Calculs de KPI globaux
-def compute_global_kpis(
-    df: pd.DataFrame,
-    campaign_cost: float = 0.0,
-    margin: float = 0.3,
-    clv_years: int = 3,
-) -> Dict[str, float]:
-    n = len(df)  # exposés
-
-    # CA et nb commandes
-    revenue = safe_sum(df, AMOUNT_COLS)
-    orders = safe_sum(df, ORDER_PARTS)
-
-    # acheteur si CA>0 ou commandes>0
-    buyers_mask = (safe_fillna(revenue, 0) > 0) | (safe_fillna(orders, 0) > 0)
-    buyers = buyers_mask.sum()
-
-    # conversion
-    conv = buyers / n if n > 0 else np.nan
-
-    # taux de réponse (si colonne response)
-    if OPTIONAL_COLS["response"] in df.columns:
-        resp_rate = df[OPTIONAL_COLS["response"]].mean()
-    else:
-        resp_rate = np.nan
-
-    total_revenue = safe_fillna(revenue, 0).sum()
-    total_orders = int(safe_fillna(orders, 0).sum())
-
-    aov = total_revenue / total_orders if total_orders > 0 else np.nan
-    cac = campaign_cost / buyers if buyers > 0 else np.nan
-    roi = (total_revenue - campaign_cost) / campaign_cost if campaign_cost > 0 else np.nan
-
-    # CLV proxy : AOV * fréquence annuelle * marge * horizon
-    if OPTIONAL_COLS["acq_date"] in df.columns:
-        acq = parse_date_safe(df[OPTIONAL_COLS["acq_date"]])
-        freq_annual = annualize_frequency(safe_fillna(orders, 0), acq)
-        aov_per_client = (safe_fillna(revenue, 0) / safe_fillna(orders, 0)).replace([np.inf, -np.inf], np.nan)
-        clv_client = aov_per_client * freq_annual * margin * clv_years
-        clv_avg = clv_client.replace([np.inf, -np.inf], np.nan).mean()
-    else:
-        clv_avg = np.nan
-
-    return {
-        "exposes": n,
-        "acheteurs": int(buyers),
-        "conversion": conv,
-        "taux_reponse": resp_rate,
-        "ca_total": total_revenue,
-        "nb_commandes": total_orders,
-        "aov": aov,
-        "cac": cac,
-        "roi": roi,
-        "clv_moyen_proxy": clv_avg,
-        "cout_campagne": campaign_cost,
-    }
-
-
-# Uplift (Test vs Control)
-def compute_uplift(df: pd.DataFrame, control_col: str) -> Dict[str, float]:
-    if control_col not in df.columns:
-        return {"uplift_conversion": np.nan, "uplift_taux_reponse": np.nan}
-
-    groups = df[control_col].dropna().unique()
-    if len(groups) < 2:
-        return {"uplift_conversion": np.nan, "uplift_taux_reponse": np.nan}
-
-    # Heuristique : on considère que la modalité qui contient "test" est Test, sinon on prend la 1ère comme Control
-    gvalues = [str(g).lower() for g in groups]
-    if any("test" in g for g in gvalues) and any("control" in g for g in gvalues):
-        test_label = [g for g in df[control_col].unique() if str(g).lower().find("test") >= 0][0]
-        control_label = [g for g in df[control_col].unique() if str(g).lower().find("control") >= 0][0]
-    else:
-        # fallback : tri alphabétique
-        sorted_vals = sorted(df[control_col].dropna().unique(), key=lambda x: str(x))
-        control_label, test_label = sorted_vals[0], sorted_vals[1]
-
-    def _metrics(sub: pd.DataFrame) -> Tuple[float, float]:
-        # conversion
-        revenue = safe_sum(sub, AMOUNT_COLS)
-        orders = safe_sum(sub, ORDER_PARTS)
-        buyers = ((safe_fillna(revenue, 0) > 0) | (safe_fillna(orders, 0) > 0)).sum()
-        conv = buyers / len(sub) if len(sub) > 0 else np.nan
-
-        # taux reponse
-        if OPTIONAL_COLS["response"] in sub.columns:
-            resp = sub[OPTIONAL_COLS["response"]].mean()
-        else:
-            resp = np.nan
-        return conv, resp
-
-    conv_test, resp_test = _metrics(df[df[control_col] == test_label])
-    conv_ctrl, resp_ctrl = _metrics(df[df[control_col] == control_label])
-
-    return {
-        "uplift_conversion": (conv_test - conv_ctrl) if pd.notna(conv_test) and pd.notna(conv_ctrl) else np.nan,
-        "uplift_taux_reponse": (resp_test - resp_ctrl) if pd.notna(resp_test) and pd.notna(resp_ctrl) else np.nan,
-        "label_test": str(test_label),
-        "label_control": str(control_label),
-        "conv_test": conv_test,
-        "conv_control": conv_ctrl,
-        "resp_test": resp_test,
-        "resp_control": resp_ctrl,
-    }
-
-
-# KPI par segments
-def compute_segment_kpis(
-    df: pd.DataFrame,
-    segments: List[str],
-    campaign_cost: float = 0.0,
-    margin: float = 0.3,
-    clv_years: int = 3,
-) -> pd.DataFrame:
-    segs = [c for c in segments if c in df.columns]
-    if not segs:
-        return pd.DataFrame()
-
-    df = df.copy()
-    df["__revenue__"] = safe_sum(df, AMOUNT_COLS)
-    df["__orders__"]  = safe_sum(df, ORDER_PARTS)
-    df["__buyer__"]   = ((safe_fillna(df["__revenue__"], 0) > 0) |
-                         (safe_fillna(df["__orders__"], 0)  > 0)).astype(int)
-    df["__response__"] = df[OPTIONAL_COLS["response"]] if OPTIONAL_COLS["response"] in df.columns else np.nan
-
-    total_rows   = len(df)
-    cost_per_row = (campaign_cost / total_rows) if total_rows > 0 else 0.0
-
-    agg = (df
-           .groupby(segs, dropna=False)
-           .agg(exposes=("__buyer__", "size"),
-                acheteurs=("__buyer__", "sum"),
-                ca_total=("__revenue__", "sum"),
-                nb_commandes=("__orders__", "sum"),
-                taux_reponse=("__response__", "mean"))
-           .reset_index())
-
-    agg["conversion"]            = agg["acheteurs"] / agg["exposes"]
-    agg["aov"]                   = agg["ca_total"] / agg["nb_commandes"].replace(0, np.nan)
-    agg["cout_campagne_alloue"]  = agg["exposes"] * cost_per_row
-    agg["roi"]                   = (agg["ca_total"] - agg["cout_campagne_alloue"]) / agg["cout_campagne_alloue"].replace(0, np.nan)
-
-    if OPTIONAL_COLS["acq_date"] in df.columns:
-        acq = parse_date_safe(df[OPTIONAL_COLS["acq_date"]])
-        df["__freq_ann__"] = annualize_frequency(safe_fillna(df["__orders__"], 0), acq)
-        df["__aov_cli__"]  = (safe_fillna(df["__revenue__"], 0) / safe_fillna(df["__orders__"], 0)).replace([np.inf, -np.inf], np.nan)
-        df["__clv_cli__"]  = df["__aov_cli__"] * df["__freq_ann__"] * margin * clv_years
-        clv_by_seg = (df.groupby(segs, dropna=False)["__clv_cli__"]
-                        .mean()
-                        .reset_index()
-                        .rename(columns={"__clv_cli__": "clv_moyen_proxy"}))
-        agg = agg.merge(clv_by_seg, on=segs, how="left")
-    else:
-        agg["clv_moyen_proxy"] = np.nan
-
-    return agg.sort_values(segs + ["exposes"], ascending=[True]*len(segs) + [False])
-
-# KPI optionnels/complémentaires
-def compute_optional_kpis(df: pd.DataFrame) -> Dict[str, float]:
-    out = {}
-
-    # Recency (jours depuis dernier achat)
-    if OPTIONAL_COLS["recency_days"] in df.columns:
-        out["recency_median_jours"] = df[OPTIONAL_COLS["recency_days"]].median()
-        out["recency_mean_jours"] = df[OPTIONAL_COLS["recency_days"]].mean()
-    else:
-        out["recency_median_jours"] = np.nan
-        out["recency_mean_jours"] = np.nan
-
-    # Visites web
-    if OPTIONAL_COLS["web_visits"] in df.columns:
-        out["visites_web_moy/mois"] = df[OPTIONAL_COLS["web_visits"]].mean()
-    else:
-        out["visites_web_moy/mois"] = np.nan
-
-    # Part des commandes sous promo
-    orders = safe_sum(df, ORDER_PARTS)
-    if OPTIONAL_COLS["promo_orders"] in df.columns:
-        promo = df[OPTIONAL_COLS["promo_orders"]].fillna(0)
-        out["part_commandes_promo"] = (promo.sum() / orders.sum()) if orders.sum() > 0 else np.nan
-    else:
-        out["part_commandes_promo"] = np.nan
-
-    # Taux d’acceptation par campagne (si colonnes présentes)
-    for key in ("acc1", "acc2", "acc3", "acc4", "acc5"):
-        col = OPTIONAL_COLS[key]
-        if col in df.columns:
-            out[f"taux_accept_{col}"] = df[col].mean()
-        else:
-            out[f"taux_accept_{col}"] = np.nan
-
-    return out
-
-# I/O
-def read_input(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        raise FileNotFoundError(f"Fichier introuvable: {path}")
-    df = pd.read_csv(path)
+def apply_aliases(df: pd.DataFrame) -> pd.DataFrame:
+    """Renomme les colonnes du DF d’après COLUMN_ALIASES si elles existent."""
+    rename_map = {src: dst for src, dst in COLUMN_ALIASES.items() if src in df.columns}
+    if rename_map:
+        df = df.rename(columns=rename_map)
     return df
 
 
-def write_outputs(
-    out_dir: Path,
-    global_kpis: Dict[str, float],
-    segment_df: pd.DataFrame,
-    optional_kpis: Dict[str, float],
-) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
+def check_columns(df: pd.DataFrame) -> None:
+    """Avertit (sans casser) si des colonnes utiles manquent."""
+    missing_soft = [c for c in SOFT_REQUIRED_COLS if c not in df.columns]
+    if missing_soft:
+        print(
+            f"[AVERTISSEMENT] Colonnes courantes manquantes (le script continue): {missing_soft}"
+        )
 
-    # CSV globaux
-    pd.DataFrame([global_kpis]).to_csv(out_dir / "kpis_summary.csv", index=False)
+    missing_purchase = [c for c in PURCHASE_CHANNEL_COLS if c not in df.columns]
+    if missing_purchase:
+        raise ValueError(
+            "Colonnes d’achats par canal manquantes : "
+            f"{missing_purchase}. Corrige les en-têtes ou mets un alias."
+        )
 
-    # CSV par segments (si non vide)
-    if segment_df is not None and not segment_df.empty:
-        segment_df.to_csv(out_dir / "kpis_by_segment.csv", index=False)
-
-    # CSV optionnels
-    pd.DataFrame([optional_kpis]).to_csv(out_dir / "kpis_optional.csv", index=False)
-
-    # Excel
-    with pd.ExcelWriter(out_dir / "kpis_report.xlsx", engine="xlsxwriter") as xw:
-        pd.DataFrame([global_kpis]).to_excel(xw, sheet_name="Global", index=False)
-        if segment_df is not None and not segment_df.empty:
-            segment_df.to_excel(xw, sheet_name="Par_segment", index=False)
-        pd.DataFrame([optional_kpis]).to_excel(xw, sheet_name="Optionnels", index=False)
+    missing_products = [c for c in PRODUCT_AMOUNT_COLS if c not in df.columns]
+    if missing_products:
+        raise ValueError(
+            "Colonnes de montants produits manquantes : "
+            f"{missing_products}. Corrige les en-têtes ou mets un alias."
+        )
 
 
-# CLI
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Calcul de KPI marketing sur camp_market_clean.csv")
-    parser.add_argument("--input", default="data/raw/camp_market_clean.csv", help="Chemin du CSV d'entrée.")
-    parser.add_argument("--output", default="data/processed", help="Dossier de sortie.")
-    parser.add_argument("--campaign-cost", type=float, default=0.0, help="Coût total de la campagne (float).")
-    parser.add_argument("--margin", type=float, default=0.30, help="Marge unitaire (0.30 = 30%).")
-    parser.add_argument("--clv-years", type=int, default=3, help="Horizon CLV en années.")
-    parser.add_argument("--control-col", default=None, help="Colonne Test/Control pour calculer l’uplift.")
-    parser.add_argument("--segments", nargs="*", default=[], help="Liste de colonnes de segmentation.")
-    return parser.parse_args()
+def coerce_dates(df: pd.DataFrame) -> pd.DataFrame:
+    """Parse les dates et remplace les dates placeholder 1970-01-01 par NaT."""
+    if "Date_acquisition_client" in df.columns:
+        df["Date_acquisition_client"] = pd.to_datetime(
+            df["Date_acquisition_client"], errors="coerce"
+        )
+        # Beaucoup de jeux posent 1970-01-01 comme valeur sentinelle -> on la traite comme manquante
+        mask_1970 = df["Date_acquisition_client"] == pd.Timestamp("1970-01-01")
+        df.loc[mask_1970, "Date_acquisition_client"] = pd.NaT
+    return df
 
 
-def main() -> None:
-    args = parse_args()
-    input_path = Path(args.input)
-    out_dir = Path(args.output)
+def add_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Crée les features RFM + dérivées (tenure, nb produits, etc.)."""
 
-    # Chargement
-    df = read_input(input_path)
+    # Total achats (fréquence)
+    df["Nb_achats_total"] = df[PURCHASE_CHANNEL_COLS].sum(axis=1)
 
-    # KPI globaux
-    global_kpis = compute_global_kpis(
-        df,
-        campaign_cost=args.campaign_cost,
-        margin=args.margin,
-        clv_years=args.clv_years,
+    # Monetary : somme des dépenses catégories
+    df["Depense_totale"] = df[PRODUCT_AMOUNT_COLS].sum(axis=1)
+
+    # Recency (jours) : on le prend tel quel si présent
+    if "Nombre_jours_depuis_dernier_achat" in df.columns:
+        df["Recence_jours"] = pd.to_numeric(
+            df["Nombre_jours_depuis_dernier_achat"], errors="coerce"
+        )
+    else:
+        df["Recence_jours"] = np.nan
+
+    # Tenure (ancienneté en jours) depuis l’acquisition jusqu’à la date de référence
+    # On prend "aujourd’hui" comme référence; tu peux figer une date si besoin.
+    today = pd.Timestamp(datetime.utcnow().date())
+    if "Date_acquisition_client" in df.columns:
+        df["Tenure_jours"] = (today - df["Date_acquisition_client"]).dt.days
+    else:
+        df["Tenure_jours"] = np.nan
+
+    # Nombre de catégories achetées (>0)
+    df["Nb_categories_achetees"] = (df[PRODUCT_AMOUNT_COLS] > 0).sum(axis=1)
+
+    # RFM quantiles (scores 1..5, 5 = meilleur)
+    def qcut_score(s, q=5, ascending=True):
+        # robustesse : si série constante -> score médian
+        if s.nunique(dropna=True) <= 1:
+            return pd.Series(3, index=s.index)
+        labels = list(range(1, q + 1))
+        if ascending:
+            return pd.qcut(s.rank(method="first"), q=q, labels=labels).astype(int)
+        else:
+            # inverser : pour Recency, plus petit = meilleur
+            return pd.qcut(s.rank(method="first"), q=q, labels=labels[::-1]).astype(int)
+
+    # R (petite recence = mieux)
+    df["R_score"] = qcut_score(df["Recence_jours"], q=5, ascending=False)
+
+    # F (plus de fréquences = mieux)
+    df["F_score"] = qcut_score(df["Nb_achats_total"], q=5, ascending=True)
+
+    # M (plus de dépenses = mieux)
+    df["M_score"] = qcut_score(df["Depense_totale"], q=5, ascending=True)
+
+    df["RFM_score"] = df["R_score"] * 100 + df["F_score"] * 10 + df["M_score"]
+
+    return df
+
+
+def safe_rate(numer, denom):
+    numer = float(numer)
+    denom = float(denom)
+    return numer / denom if denom != 0 else 0.0
+
+
+def compute_kpis(df: pd.DataFrame, control_col: str | None, segments: list[str]) -> pd.DataFrame:
+    """
+    Calcule des KPI de base globalement, par segments, et (si présent) par groupe test/contrôle.
+    """
+    rows = []
+
+    def push_row(scope: str, scope_value: str | None, data: pd.DataFrame):
+        n = len(data)
+        response_rate = data["Response"].mean() if "Response" in data.columns else np.nan
+        avg_spend = data["Depense_totale"].mean()
+        freq = data["Nb_achats_total"].mean()
+        visits = data["Nb_visites_web_mois"].mean() if "Nb_visites_web_mois" in data.columns else np.nan
+        rows.append(
+            {
+                "Niveau": scope,
+                "Valeur": scope_value if scope_value is not None else "Global",
+                "Nb_clients": n,
+                "Taux_reponse": response_rate,
+                "Depense_moy": avg_spend,
+                "Freq_achats_moy": freq,
+                "Visites_web_moy": visits,
+                "R_score_moy": data["R_score"].mean(),
+                "F_score_moy": data["F_score"].mean(),
+                "M_score_moy": data["M_score"].mean(),
+                "RFM_score_moy": data["RFM_score"].mean(),
+            }
+        )
+
+    # Global
+    push_row("Global", None, df)
+
+    # Par segments univariés
+    for seg in segments:
+        if seg not in df.columns:
+            print(f"[AVERTISSEMENT] Segment '{seg}' introuvable, ignoré.")
+            continue
+        for val, grp in df.groupby(seg):
+            push_row(seg, str(val), grp)
+
+    # Test / Contrôle (si demandé et présent)
+    if control_col:
+        if control_col not in df.columns:
+            print(f"[AVERTISSEMENT] Colonne de contrôle '{control_col}' absente, section test/contrôle ignorée.")
+        else:
+            # KPI par groupe
+            for val, grp in df.groupby(control_col):
+                push_row(f"{control_col}", str(val), grp)
+
+            # Si binaire (2 groupes), on donne un lift simple sur le taux de réponse
+            if df[control_col].nunique(dropna=True) == 2 and "Response" in df.columns:
+                piv = df.groupby(control_col)["Response"].mean().rename("taux")
+                if len(piv) == 2:
+                    a, b = piv.index.tolist()
+                    lift = (piv[a] - piv[b]) / piv[b] if piv[b] != 0 else np.nan
+                    rows.append(
+                        {
+                            "Niveau": f"Lift_{control_col}",
+                            "Valeur": f"{a} vs {b}",
+                            "Nb_clients": np.nan,
+                            "Taux_reponse": lift,
+                            "Depense_moy": np.nan,
+                            "Freq_achats_moy": np.nan,
+                            "Visites_web_moy": np.nan,
+                            "R_score_moy": np.nan,
+                            "F_score_moy": np.nan,
+                            "M_score_moy": np.nan,
+                            "RFM_score_moy": np.nan,
+                        }
+                    )
+
+    return pd.DataFrame(rows)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Campagne marketing • Clustering & KPI"
     )
+    parser.add_argument("--input", dest="input_path", required=True, help="Chemin vers le CSV d’entrée (données clients).")
+    parser.add_argument("--output_dir", default="processed", help="Dossier de sortie (défaut: processed).")
+    parser.add_argument("--campaign-cost", type=float, default=0.0, help="Coût total de la campagne (optionnel).")
+    parser.add_argument("--control-col", default=None, help="Nom de la colonne de groupe (ex: Groupe Test/Contrôle).")
+    parser.add_argument("--segments", default="", help="Liste de colonnes segments séparées par des virgules.")
+    args = parser.parse_args()
 
-    # Uplift (si demandé)
-    if args.control_col:
-        uplift = compute_uplift(df, args.control_col)
-        global_kpis.update(uplift)
+    input_path = args.input_path
+    output_dir = args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
 
-    # KPI par segments
-    seg_df = compute_segment_kpis(
-        df,
-        segments=args.segments,
-        campaign_cost=args.campaign_cost,
-        margin=args.margin,
-        clv_years=args.clv_years,
-    )
+    print("\n— Lecture du fichier:", input_path)
+    df = pd.read_csv(input_path)
+    print(f"— Dimensions: {df.shape[0]:,} lignes x {df.shape[1]} colonnes")
 
-    # KPI optionnels
-    optional_kpis = compute_optional_kpis(df)
+    # Harmonisation noms
+    df = apply_aliases(df)
 
-    # Exports
-    write_outputs(out_dir, global_kpis, seg_df, optional_kpis)
+    # Vérifs colonnes
+    check_columns(df)
 
-    # Affichage console synthétique
-    print("\n=== KPI GLOBAUX ===")
-    for k, v in global_kpis.items():
-        print(f"{k:>24} : {v}")
+    # Dates / tenure
+    df = coerce_dates(df)
 
-    if args.segments:
-        print("\n=== KPI PAR SEGMENT ===")
-        print(seg_df.head(20).to_string(index=False))
+    print("— Génération des features (RFM, nb produits, canaux, tenure)")
+    df = add_features(df)
 
-    print("\n=== KPI OPTIONNELS ===")
-    for k, v in optional_kpis.items():
-        print(f"{k:>24} : {v}")
+    # Parse segments
+    segments = [c.strip() for c in args.segments.split(",") if c.strip()]
 
-    print(f"\nFichiers exportés dans: {out_dir.resolve()}")
+    print("— Calcul des KPI")
+    kpis = compute_kpis(df, control_col=args.control_col, segments=segments)
+
+    # Ajout rapide d'info coût campagne (global) si fourni
+    if args.campaign_cost and args.campaign_cost > 0 and "Response" in df.columns:
+        n_targeted = len(df)
+        responses = df["Response"].sum()
+        cost_per_target = args.campaign_cost / n_targeted if n_targeted else np.nan
+        cost_per_response = args.campaign_cost / responses if responses else np.nan
+        print(
+            f"— Coût campagne: {args.campaign_cost:,.2f} | "
+            f"Cout/contact: {cost_per_target:,.2f} | "
+            f"Cout/réponse: {cost_per_response if not np.isnan(cost_per_response) else 'NA'}"
+        )
+        # On append une ligne d’info budget en bas du tableau KPI
+        kpis = pd.concat(
+            [
+                kpis,
+                pd.DataFrame(
+                    [
+                        {
+                            "Niveau": "Budget",
+                            "Valeur": "Campagne",
+                            "Nb_clients": n_targeted,
+                            "Taux_reponse": df["Response"].mean(),
+                            "Depense_moy": np.nan,
+                            "Freq_achats_moy": np.nan,
+                            "Visites_web_moy": np.nan,
+                            "R_score_moy": np.nan,
+                            "F_score_moy": np.nan,
+                            "M_score_moy": np.nan,
+                            "RFM_score_moy": np.nan,
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+
+    # Sauvegardes
+    features_path = os.path.join(output_dir, "features.csv")
+    kpis_path = os.path.join(output_dir, "kpis.csv")
+
+    df.to_csv(features_path, index=False)
+    kpis.to_csv(kpis_path, index=False)
+
+    print(f"\n✓ Features écrites dans: {features_path}")
+    print(f"✓ KPI écrits dans: {kpis_path}\n")
+    print("Terminé.")
 
 
 if __name__ == "__main__":
-    warnings.filterwarnings("ignore", category=FutureWarning)
     main()
