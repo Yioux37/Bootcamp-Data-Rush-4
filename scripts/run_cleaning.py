@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# scripts/run_cleaning.py
 import argparse
 from pathlib import Path
 import numpy as np
@@ -24,10 +22,7 @@ FR_ORDER = [
 
 # Utils
 def bar(title: str, ch: str="═", width: int=70):
-    t = f" {title} "
-    n = max(0, width - len(t))
-    L = n // 2
-    R = n - L
+    t = f" {title} "; n = max(0, width - len(t)); L = n // 2; R = n - L
     return f"{ch*L}{t}{ch*R}"
 
 def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -120,9 +115,18 @@ def clean_business_rules(df: pd.DataFrame):
             mode = df[c].mode(dropna=True)
             df[c] = df[c].fillna(mode.iloc[0] if not mode.empty else "Unknown")
 
-    # (7) binaires texte -> 0/1
+    # (7) binaires texte -> 0/1 (exclure tous les compteurs pour éviter la binarisation accidentelle)
+    EXCLUDE_BIN = {
+        "kidhome", "teenhome",                           # enfants/ados à charge (comptes)
+        "numdealspurchases", "numwebpurchases",
+        "numcatalogpurchases", "numstorepurchases",
+        "numwebvisitsmonth", "recency",
+        "mntwines", "mntfruits", "mntmeatproducts",
+        "mntfishproducts", "mntsweetproducts", "mntgoldprods",
+        "income", "z_costcontact", "z_revenue"
+    }
     for c in df.columns:
-        if not is_numeric_dtype(df[c]) and df[c].nunique(dropna=True) == 2:
+        if (c not in EXCLUDE_BIN) and (not is_numeric_dtype(df[c])) and df[c].nunique(dropna=True) == 2:
             df[c] = df[c].astype(str).str.lower().map(lambda v: 1 if v in POS else 0)
 
     # (8) doublons globaux
@@ -138,8 +142,8 @@ def to_french_schema(df: pd.DataFrame) -> pd.DataFrame:
         "Education":                    df.get("education").astype(str),
         "Situation_matrimoniale":       df.get("marital_status").astype(str),
         "Revenu":                       to_num(df.get("income")).fillna(0).astype(float),
-        "Enfant_charge":                to_num(df.get("kidhome")).fillna(0).astype(int),
-        "Ado_charge":                   to_num(df.get("teenhome")).fillna(0).astype(int),
+        "Enfant_charge":                to_num(df.get("kidhome")).fillna(0).astype(int),   # ← nombre
+        "Ado_charge":                   to_num(df.get("teenhome")).fillna(0).astype(int),  # ← nombre
         "Date_acquisition_client":      pd.to_datetime(df.get("dt_customer"), errors="coerce"),
         "Nombre_jours_depuis_dernier_achat":
                                         to_num(df.get("recency")).fillna(0).astype(int),
@@ -151,7 +155,6 @@ def to_french_schema(df: pd.DataFrame) -> pd.DataFrame:
         "Montant_luxe":                 to_num(df.get("mntgoldprods")).fillna(0).astype(float),
         "Nb_achats_promo":              to_num(df.get("numdealspurchases")).fillna(0).astype(int),
         "Nb_achats_en_ligne":           to_num(df.get("numwebpurchases")).fillna(0).astype(int),
-        # ← ICI : quantités, pas binaire
         "Achats_catalogue":             to_num(df.get("numcatalogpurchases")).fillna(0).astype(int),
         "Achats_magasin":               to_num(df.get("numstorepurchases")).fillna(0).astype(int),
         "Nb_visites_web_mois":          to_num(df.get("numwebvisitsmonth")).fillna(0).astype(int),
