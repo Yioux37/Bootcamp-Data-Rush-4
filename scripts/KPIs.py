@@ -1,318 +1,387 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+kpi_terminal.py — KPIs marketing avec rendu terminal soigné (FR).
+Usage:
+  python kpi_terminal.py --file data/camp_market_clean.csv --cout-campagne 10000 --marge 0.3 --horizon 2
+"""
+
 import argparse
-import os
 from datetime import datetime
+import math
+import sys
+import re
 import numpy as np
 import pandas as pd
 
+# ---------- Helpers d'affichage (pas de dépendance externe) ----------
 
-# =========
-# Aliases : harmonisation des noms réels -> noms attendus par le script
-# =========
-# On renomme le DataFrame pour que le reste du code utilise des noms "propres".
-COLUMN_ALIASES = {
-    # Achats / canaux
-    "Nb_achats_en_ligne": "Achats_en_ligne",
-    # (Ajouter d'autres alias si nécessaire)
-    # "Visites_web_mois": "Nb_visites_web_mois",
-    # "Date_client": "Date_acquisition_client",
-}
+USE_UNICODE = sys.stdout.encoding and "UTF" in sys.stdout.encoding.upper()
 
-# Colonnes des montants produits (utilisées pour Monetary et nb produits)
-PRODUCT_AMOUNT_COLS = [
-    "Montant_vin",
-    "Montant_fruits",
-    "Montant_viande",
-    "Montant_poisson",
-    "Montant_sucreries",
-    "Montant_luxe",
-]
+def _hline(width, heavy=False):
+    if USE_UNICODE:
+        h = "═" if heavy else "─"
+        return h * width
+    return "-" * width
 
-# Colonnes d’achats par canal
-PURCHASE_CHANNEL_COLS = [
-    "Achats_en_ligne",
-    "Achats_catalogue",
-    "Achats_magasin",
-]
-
-# Quelques colonnes attendues pour des contrôles simples
-SOFT_REQUIRED_COLS = [
-    "Identifiant",
-    "Année_naissance",
-    "Education",
-    "Situation_matrimoniale",
-    "Revenu",
-    "Enfant_charge",
-    "Ado_charge",
-    "Date_acquisition_client",
-    "Nombre_jours_depuis_dernier_achat",
-    "Nb_visites_web_mois",
-    "Response",
-]
-
-
-def apply_aliases(df: pd.DataFrame) -> pd.DataFrame:
-    """Renomme les colonnes du DF d’après COLUMN_ALIASES si elles existent."""
-    rename_map = {src: dst for src, dst in COLUMN_ALIASES.items() if src in df.columns}
-    if rename_map:
-        df = df.rename(columns=rename_map)
-    return df
-
-
-def check_columns(df: pd.DataFrame) -> None:
-    """Avertit (sans casser) si des colonnes utiles manquent."""
-    missing_soft = [c for c in SOFT_REQUIRED_COLS if c not in df.columns]
-    if missing_soft:
-        print(
-            f"[AVERTISSEMENT] Colonnes courantes manquantes (le script continue): {missing_soft}"
-        )
-
-    missing_purchase = [c for c in PURCHASE_CHANNEL_COLS if c not in df.columns]
-    if missing_purchase:
-        raise ValueError(
-            "Colonnes d’achats par canal manquantes : "
-            f"{missing_purchase}. Corrige les en-têtes ou mets un alias."
-        )
-
-    missing_products = [c for c in PRODUCT_AMOUNT_COLS if c not in df.columns]
-    if missing_products:
-        raise ValueError(
-            "Colonnes de montants produits manquantes : "
-            f"{missing_products}. Corrige les en-têtes ou mets un alias."
-        )
-
-
-def coerce_dates(df: pd.DataFrame) -> pd.DataFrame:
-    """Parse les dates et remplace les dates placeholder 1970-01-01 par NaT."""
-    if "Date_acquisition_client" in df.columns:
-        df["Date_acquisition_client"] = pd.to_datetime(
-            df["Date_acquisition_client"], errors="coerce"
-        )
-        # Beaucoup de jeux posent 1970-01-01 comme valeur sentinelle -> on la traite comme manquante
-        mask_1970 = df["Date_acquisition_client"] == pd.Timestamp("1970-01-01")
-        df.loc[mask_1970, "Date_acquisition_client"] = pd.NaT
-    return df
-
-
-def add_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Crée les features RFM + dérivées (tenure, nb produits, etc.)."""
-
-    # Total achats (fréquence)
-    df["Nb_achats_total"] = df[PURCHASE_CHANNEL_COLS].sum(axis=1)
-
-    # Monetary : somme des dépenses catégories
-    df["Depense_totale"] = df[PRODUCT_AMOUNT_COLS].sum(axis=1)
-
-    # Recency (jours) : on le prend tel quel si présent
-    if "Nombre_jours_depuis_dernier_achat" in df.columns:
-        df["Recence_jours"] = pd.to_numeric(
-            df["Nombre_jours_depuis_dernier_achat"], errors="coerce"
-        )
+def _box(title, lines, width=80):
+    title = f" {title.strip()} "
+    if USE_UNICODE:
+        tl, tr, bl, br = "╔", "╗", "╚", "╝"
+        top = tl + _hline(width - 2, True) + tr
+        bot = bl + _hline(width - 2, True) + br
+        title_bar = "╠" + title.center(width - 2, "═") + "╣"
+        content = []
+        for ln in lines:
+            s = ln[:width - 4]
+            content.append("║ " + s.ljust(width - 4) + " ║")
+        return "\n".join([top, title_bar] + content + [bot])
     else:
-        df["Recence_jours"] = np.nan
+        top = "+" + _hline(width - 2) + "+"
+        title_bar = "+" + title.center(width - 2, "-") + "+"
+        bot = "+" + _hline(width - 2) + "+"
+        content = []
+        for ln in lines:
+            s = ln[:width - 4]
+            content.append("| " + s.ljust(width - 4) + " |")
+        return "\n".join([top, title_bar] + content + [bot])
 
-    # Tenure (ancienneté en jours) depuis l’acquisition jusqu’à la date de référence
-    # On prend "aujourd’hui" comme référence; tu peux figer une date si besoin.
-    today = pd.Timestamp(datetime.utcnow().date())
-    if "Date_acquisition_client" in df.columns:
-        df["Tenure_jours"] = (today - df["Date_acquisition_client"]).dt.days
-    else:
-        df["Tenure_jours"] = np.nan
+def fmt_num(x, decimals=2):
+    try:
+        if x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x))):
+            return "-"
+        if isinstance(x, (int, np.integer)):
+            return f"{int(x):,}".replace(",", " ")
+        return f"{float(x):,.{decimals}f}".replace(",", " ")
+    except Exception:
+        return "-"
 
-    # Nombre de catégories achetées (>0)
-    df["Nb_categories_achetees"] = (df[PRODUCT_AMOUNT_COLS] > 0).sum(axis=1)
+def fmt_pct(x, decimals=2):
+    try:
+        if x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x))):
+            return "-"
+        return f"{100*float(x):.{decimals}f}%"
+    except Exception:
+        return "-"
 
-    # RFM quantiles (scores 1..5, 5 = meilleur)
-    def qcut_score(s, q=5, ascending=True):
-        # robustesse : si série constante -> score médian
-        if s.nunique(dropna=True) <= 1:
-            return pd.Series(3, index=s.index)
-        labels = list(range(1, q + 1))
-        if ascending:
-            return pd.qcut(s.rank(method="first"), q=q, labels=labels).astype(int)
-        else:
-            # inverser : pour Recency, plus petit = meilleur
-            return pd.qcut(s.rank(method="first"), q=q, labels=labels[::-1]).astype(int)
+def safe_div(a, b):
+    try:
+        if b == 0 or b is None or (isinstance(b, float) and math.isnan(b)):
+            return float("nan")
+        return a / b
+    except Exception:
+        return float("nan")
 
-    # R (petite recence = mieux)
-    df["R_score"] = qcut_score(df["Recence_jours"], q=5, ascending=False)
+def print_kv_table(title, rows, width=80, key_w=34):
+    # rows: list of (label, value_str)
+    lines = []
+    for k, v in rows:
+        k = str(k)
+        v = str(v)
+        if len(k) > key_w:
+            k = k[:key_w-1] + "…"
+        pad = " " * max(1, key_w - len(k))
+        lines.append(f"{k}{pad} : {v}")
+    print(_box(title, lines, width=width))
+    print()
 
-    # F (plus de fréquences = mieux)
-    df["F_score"] = qcut_score(df["Nb_achats_total"], q=5, ascending=True)
+def print_table(title, headers, rows, width=80, col_w=None):
+    if col_w is None:
+        n = len(headers)
+        col_w = [max(len(str(h)), 10) for h in headers]
+        for r in rows:
+            for i, c in enumerate(r):
+                col_w[i] = max(col_w[i], len(str(c)))
+        total = sum(col_w) + 3*(len(headers)-1)
+        target = min(max(total, 40), width-4)
+        if total > target:
+            ratio = target/total
+            col_w = [max(8, int(w*ratio)) for w in col_w]
 
-    # M (plus de dépenses = mieux)
-    df["M_score"] = qcut_score(df["Depense_totale"], q=5, ascending=True)
+    def fmt_row(cells):
+        out = []
+        for i, c in enumerate(cells):
+            s = str(c)
+            if len(s) > col_w[i]:
+                s = s[:col_w[i]-1] + "…"
+            out.append(s.ljust(col_w[i]))
+        return " | ".join(out)
 
-    df["RFM_score"] = df["R_score"] * 100 + df["F_score"] * 10 + df["M_score"]
+    lines = []
+    lines.append(fmt_row(headers))
+    lines.append("-" * len(lines[0]))
+    for r in rows:
+        lines.append(fmt_row(r))
+    print(_box(title, lines, width=width))
+    print()
 
-    return df
+# ---------- Utilitaires de nettoyage ----------
 
-
-def safe_rate(numer, denom):
-    numer = float(numer)
-    denom = float(denom)
-    return numer / denom if denom != 0 else 0.0
-
-
-def compute_kpis(df: pd.DataFrame, control_col: str | None, segments: list[str]) -> pd.DataFrame:
+def ensure_numeric(df, cols):
     """
-    Calcule des KPI de base globalement, par segments, et (si présent) par groupe test/contrôle.
+    Force les colonnes indiquées en float.
+    Gère les virgules décimales, espaces, symboles monétaires, etc.
     """
-    rows = []
-
-    def push_row(scope: str, scope_value: str | None, data: pd.DataFrame):
-        n = len(data)
-        response_rate = data["Response"].mean() if "Response" in data.columns else np.nan
-        avg_spend = data["Depense_totale"].mean()
-        freq = data["Nb_achats_total"].mean()
-        visits = data["Nb_visites_web_mois"].mean() if "Nb_visites_web_mois" in data.columns else np.nan
-        rows.append(
-            {
-                "Niveau": scope,
-                "Valeur": scope_value if scope_value is not None else "Global",
-                "Nb_clients": n,
-                "Taux_reponse": response_rate,
-                "Depense_moy": avg_spend,
-                "Freq_achats_moy": freq,
-                "Visites_web_moy": visits,
-                "R_score_moy": data["R_score"].mean(),
-                "F_score_moy": data["F_score"].mean(),
-                "M_score_moy": data["M_score"].mean(),
-                "RFM_score_moy": data["RFM_score"].mean(),
-            }
-        )
-
-    # Global
-    push_row("Global", None, df)
-
-    # Par segments univariés
-    for seg in segments:
-        if seg not in df.columns:
-            print(f"[AVERTISSEMENT] Segment '{seg}' introuvable, ignoré.")
+    for c in cols:
+        if c not in df.columns:
             continue
-        for val, grp in df.groupby(seg):
-            push_row(seg, str(val), grp)
+        s = df[c].astype(str)
+        # virgules -> points
+        s = s.str.replace(",", ".", regex=False)
+        # enlève tout sauf chiffres, point, signe, exposant
+        s = s.str.replace(r'[^0-9\.\-eE+]', '', regex=True)
+        df[c] = pd.to_numeric(s, errors="coerce")
+    return df
 
-    # Test / Contrôle (si demandé et présent)
-    if control_col:
-        if control_col not in df.columns:
-            print(f"[AVERTISSEMENT] Colonne de contrôle '{control_col}' absente, section test/contrôle ignorée.")
-        else:
-            # KPI par groupe
-            for val, grp in df.groupby(control_col):
-                push_row(f"{control_col}", str(val), grp)
+# ---------- Calculs KPI ----------
 
-            # Si binaire (2 groupes), on donne un lift simple sur le taux de réponse
-            if df[control_col].nunique(dropna=True) == 2 and "Response" in df.columns:
-                piv = df.groupby(control_col)["Response"].mean().rename("taux")
-                if len(piv) == 2:
-                    a, b = piv.index.tolist()
-                    lift = (piv[a] - piv[b]) / piv[b] if piv[b] != 0 else np.nan
-                    rows.append(
-                        {
-                            "Niveau": f"Lift_{control_col}",
-                            "Valeur": f"{a} vs {b}",
-                            "Nb_clients": np.nan,
-                            "Taux_reponse": lift,
-                            "Depense_moy": np.nan,
-                            "Freq_achats_moy": np.nan,
-                            "Visites_web_moy": np.nan,
-                            "R_score_moy": np.nan,
-                            "F_score_moy": np.nan,
-                            "M_score_moy": np.nan,
-                            "RFM_score_moy": np.nan,
-                        }
-                    )
+def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
+    # Colonnes attendues (FR)
+    required = [
+        "Identifiant","Année_naissance","Education","Situation_matrimoniale","Revenu",
+        "Enfant_charge","Ado_charge","Date_acquisition_client","Nombre_jours_depuis_dernier_achat",
+        "Montant_vin","Montant_fruits","Montant_viande","Montant_poisson","Montant_sucreries","Montant_luxe",
+        "Nb_achats_promo","Nb_achats_en_ligne","Achats_catalogue","Achats_magasin","Nb_visites_web_mois",
+        "Accepte_Campagne_3","Accepte_Campagne_4","Accepte_Campagne_5","Accepte_Campagne_1","Accepte_Campagne_2",
+        "Reclamation_client","Z_CostContact","Z_Revenue","Response"
+    ]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Colonnes manquantes: {missing}")
 
-    return pd.DataFrame(rows)
+    # Dates
+    if not pd.api.types.is_datetime64_any_dtype(df["Date_acquisition_client"]):
+        df["Date_acquisition_client"] = pd.to_datetime(df["Date_acquisition_client"], errors="coerce")
 
+    # Force numérique sur toutes les colonnes quantitatives
+    numeric_cols = [
+        "Identifiant","Année_naissance","Revenu","Enfant_charge","Ado_charge",
+        "Nombre_jours_depuis_dernier_achat","Nb_achats_promo","Nb_achats_en_ligne",
+        "Achats_catalogue","Achats_magasin","Nb_visites_web_mois",
+        "Z_CostContact","Z_Revenue","Response",
+        "Montant_vin","Montant_fruits","Montant_viande","Montant_poisson","Montant_sucreries","Montant_luxe",
+    ]
+    df = ensure_numeric(df, numeric_cols)
+
+    # Response propre (0/1)
+    if "Response" in df.columns:
+        df["Response"] = df["Response"].fillna(0).astype(float)
+
+    today = pd.Timestamp.today().normalize()
+
+    # Features de base
+    df["Age"] = (today.year - df["Année_naissance"]).astype(float)
+    df["Tenure_j"] = (today - df["Date_acquisition_client"]).dt.days.astype(float)
+    df["Recency_j"] = df["Nombre_jours_depuis_dernier_achat"].astype(float)
+
+    spend_cols = [
+        "Montant_vin","Montant_fruits","Montant_viande",
+        "Montant_poisson","Montant_sucreries","Montant_luxe"
+    ]
+    df["Spend_total"] = df[spend_cols].sum(axis=1)
+
+    df["Freq"] = df["Achats_catalogue"] + df["Achats_magasin"] + df["Nb_achats_en_ligne"]
+    df["AOV"] = df["Spend_total"] / df["Freq"].replace(0, np.nan)
+
+    # Mix canal
+    df["Part_online"]    = df["Nb_achats_en_ligne"] / df["Freq"].replace(0, np.nan)
+    df["Part_magasin"]   = df["Achats_magasin"] / df["Freq"].replace(0, np.nan)
+    df["Part_catalogue"] = df["Achats_catalogue"] / df["Freq"].replace(0, np.nan)
+
+    # Mix catégories
+    for cat in ["vin","fruits","viande","poisson","sucreries","luxe"]:
+        df[f"Part_{cat}"] = df[f"Montant_{cat}"] / df["Spend_total"].replace(0, np.nan)
+
+    # Cross-sell & promo
+    df["Cross_sell"] = (df[spend_cols] > 0).sum(axis=1) / len(spend_cols)
+    df["Promo_ratio"] = df["Nb_achats_promo"] / df["Freq"].replace(0, np.nan)
+
+    # Charges & réclamations
+    df["Charge_index"] = df["Enfant_charge"] + df["Ado_charge"]
+    df["Has_claim"] = (df["Reclamation_client"] > 0).astype(int)
+
+    # Freq annuelle (proxy) pour CLV
+    df["Tenure_annees"] = (df["Tenure_j"] / 365).clip(lower=1/12)  # >= 1 mois
+    df["Freq_par_an"] = df["Freq"] / df["Tenure_annees"]
+    df["CLV_lite"] = df["AOV"] * df["Freq_par_an"] * float(marge) * float(horizon)
+
+    # Colonne de contrôle (TRT/CTL) auto si absente
+    if "Groupe" not in df.columns:
+        # hash stable de l'identifiant -> split 50/50 reproductible
+        rng = pd.util.hash_pandas_object(df["Identifiant"].fillna(0).astype(int), index=False)
+        df["Groupe"] = (rng % 2 == 0).astype(int)  # 1=TRT, 0=CTL
+
+    # Agrégations clés
+    n_total = len(df)
+    n_trt = int((df["Groupe"] == 1).sum())
+    n_ctl = int((df["Groupe"] == 0).sum())
+
+    conv_total = float(df["Response"].mean())
+    conv_trt = float(df.loc[df["Groupe"] == 1, "Response"].mean())
+    conv_ctl = float(df.loc[df["Groupe"] == 0, "Response"].mean())
+
+    uplift_abs = conv_trt - conv_ctl
+    uplift_rel = uplift_abs / conv_ctl if conv_ctl and not math.isnan(conv_ctl) and conv_ctl > 0 else float("nan")
+
+    rev_trt = float(df.loc[df["Groupe"] == 1, "Spend_total"].mean())
+    rev_ctl = float(df.loc[df["Groupe"] == 0, "Spend_total"].mean())
+    inc_rev_p_cust = rev_trt - rev_ctl
+    inc_rev_total = inc_rev_p_cust * n_trt
+
+    # CPA & ROI
+    acheteurs_trt = int(df.loc[df["Groupe"] == 1, "Response"].sum())
+    cpa = safe_div(cout_campagne, acheteurs_trt) if cout_campagne > 0 else float("nan")
+    roi = safe_div((inc_rev_total - cout_campagne), cout_campagne) if cout_campagne > 0 else float("nan")
+
+    # Récap global
+    global_kpi = {
+        "Clients (total)": n_total,
+        "Test (TRT)": n_trt,
+        "Contrôle (CTL)": n_ctl,
+        "Taux de réponse (global)": conv_total,
+        "Freq moyenne": float(df["Freq"].mean()),
+        "AOV moyen": float(df["AOV"].mean()),
+        "Dépense totale moyenne": float(df["Spend_total"].mean()),
+        "CLV lite moyenne": float(df["CLV_lite"].mean()),
+        "Promo_ratio moyen": float(df["Promo_ratio"].mean()),
+        "Part online moyenne": float(df["Part_online"].mean()),
+        "Réclamants (%)": float(df["Has_claim"].mean()),
+    }
+
+    campagne_kpi = {
+        "Conv TRT": conv_trt,
+        "Conv CTL": conv_ctl,
+        "Uplift absolu": uplift_abs,
+        "Uplift relatif": uplift_rel,
+        "Δ Revenu moyen/cliente": inc_rev_p_cust,
+        "Incrément total (≈)": inc_rev_total,
+        "CPA (si coût>0)": cpa,
+        "ROI incrémental": roi,
+        "Acheteurs TRT (#)": acheteurs_trt
+    }
+
+    # Segments rapides (assure dtype numérique pour nlargest)
+    df["CLV_lite"] = pd.to_numeric(df["CLV_lite"], errors="coerce").fillna(0.0)
+    top_val = df.nlargest(5, "CLV_lite")[["Identifiant","CLV_lite","Spend_total","Freq","AOV","Part_online","Promo_ratio"]]
+    risques = df.sort_values("Recency_j", ascending=False).head(5)[["Identifiant","Recency_j","Spend_total","Freq","Part_online"]]
+
+    return df, global_kpi, campagne_kpi, top_val, risques
+
+# ---------- Main ----------
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Campagne marketing • Clustering & KPI"
-    )
-    parser.add_argument("--input", dest="input_path", required=True, help="Chemin vers le CSV d’entrée (données clients).")
-    parser.add_argument("--output_dir", default="processed", help="Dossier de sortie (défaut: processed).")
-    parser.add_argument("--campaign-cost", type=float, default=0.0, help="Coût total de la campagne (optionnel).")
-    parser.add_argument("--control-col", default=None, help="Nom de la colonne de groupe (ex: Groupe Test/Contrôle).")
-    parser.add_argument("--segments", default="", help="Liste de colonnes segments séparées par des virgules.")
+    parser = argparse.ArgumentParser(description="KPIs marketing – rendu terminal soigné")
+    parser.add_argument("--file", required=True, help="Chemin du CSV nettoyé")
+    parser.add_argument("--cout-campagne", type=float, default=0.0, help="Coût total de la campagne (monétaire)")
+    parser.add_argument("--marge", type=float, default=0.30, help="Marge (%) utilisée pour CLV lite (ex: 0.30)")
+    parser.add_argument("--horizon", type=float, default=2.0, help="Horizon (années) pour CLV lite (ex: 2)")
+    parser.add_argument("--width", type=int, default=96, help="Largeur d'affichage")
     args = parser.parse_args()
 
-    input_path = args.input_path
-    output_dir = args.output_dir
-    os.makedirs(output_dir, exist_ok=True)
+    try:
+        df = pd.read_csv(args.file, parse_dates=["Date_acquisition_client"])
+    except Exception as e:
+        print(f"Erreur de lecture CSV: {e}")
+        sys.exit(1)
 
-    print("\n— Lecture du fichier:", input_path)
-    df = pd.read_csv(input_path)
-    print(f"— Dimensions: {df.shape[0]:,} lignes x {df.shape[1]} colonnes")
+    # Info colonne de contrôle
+    warn = None
+    if "Groupe" not in df.columns:
+        warn = "[INFO] Colonne de contrôle 'Groupe' absente -> création automatique (aléatoire 50/50)."
 
-    # Harmonisation noms
-    df = apply_aliases(df)
-
-    # Vérifs colonnes
-    check_columns(df)
-
-    # Dates / tenure
-    df = coerce_dates(df)
-
-    print("— Génération des features (RFM, nb produits, canaux, tenure)")
-    df = add_features(df)
-
-    # Parse segments
-    segments = [c.strip() for c in args.segments.split(",") if c.strip()]
-
-    print("— Calcul des KPI")
-    kpis = compute_kpis(df, control_col=args.control_col, segments=segments)
-
-    # Ajout rapide d'info coût campagne (global) si fourni
-    if args.campaign_cost and args.campaign_cost > 0 and "Response" in df.columns:
-        n_targeted = len(df)
-        responses = df["Response"].sum()
-        cost_per_target = args.campaign_cost / n_targeted if n_targeted else np.nan
-        cost_per_response = args.campaign_cost / responses if responses else np.nan
-        print(
-            f"— Coût campagne: {args.campaign_cost:,.2f} | "
-            f"Cout/contact: {cost_per_target:,.2f} | "
-            f"Cout/réponse: {cost_per_response if not np.isnan(cost_per_response) else 'NA'}"
+    try:
+        df_out, global_kpi, campagne_kpi, top_val, risques = build_kpis(
+            df,
+            cout_campagne=args.cout_campagne,
+            marge=args.marge,
+            horizon=args.horizon
         )
-        # On append une ligne d’info budget en bas du tableau KPI
-        kpis = pd.concat(
-            [
-                kpis,
-                pd.DataFrame(
-                    [
-                        {
-                            "Niveau": "Budget",
-                            "Valeur": "Campagne",
-                            "Nb_clients": n_targeted,
-                            "Taux_reponse": df["Response"].mean(),
-                            "Depense_moy": np.nan,
-                            "Freq_achats_moy": np.nan,
-                            "Visites_web_moy": np.nan,
-                            "R_score_moy": np.nan,
-                            "F_score_moy": np.nan,
-                            "M_score_moy": np.nan,
-                            "RFM_score_moy": np.nan,
-                        }
-                    ]
-                ),
-            ],
-            ignore_index=True,
-        )
+    except Exception as e:
+        print(f"Erreur de calcul KPI: {e}")
+        sys.exit(2)
 
-    # Sauvegardes
-    features_path = os.path.join(output_dir, "features.csv")
-    kpis_path = os.path.join(output_dir, "kpis.csv")
+    width = args.width
 
-    df.to_csv(features_path, index=False)
-    kpis.to_csv(kpis_path, index=False)
+    # Header
+    header_lines = [
+        f"Fichier : {args.file}",
+        f"Date exécution : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Paramètres : coût={fmt_num(args.cout_campagne)} | marge={fmt_pct(args.marge)} | horizon={fmt_num(args.horizon,1)} an(s)"
+    ]
+    print(_box("TABLEAU DE BORD KPI – TERMINAL", header_lines, width=width))
+    print()
 
-    print(f"\n✓ Features écrites dans: {features_path}")
-    print(f"✓ KPI écrits dans: {kpis_path}\n")
-    print("Terminé.")
+    if warn:
+        print(_box("NOTE", [warn], width=width))
+        print()
 
+    # Bloc Global
+    rows_global = [
+        ("Clients (total)", fmt_num(global_kpi["Clients (total)"], 0)),
+        ("Test (TRT)", fmt_num(global_kpi["Test (TRT)"], 0)),
+        ("Contrôle (CTL)", fmt_num(global_kpi["Contrôle (CTL)"], 0)),
+        ("Taux de réponse (global)", fmt_pct(global_kpi["Taux de réponse (global)"])),
+        ("Freq moyenne", fmt_num(global_kpi["Freq moyenne"], 2)),
+        ("AOV moyen", fmt_num(global_kpi["AOV moyen"], 2)),
+        ("Dépense totale moyenne", fmt_num(global_kpi["Dépense totale moyenne"], 2)),
+        ("CLV lite moyenne", fmt_num(global_kpi["CLV lite moyenne"], 2)),
+        ("Promo_ratio moyen", fmt_pct(global_kpi["Promo_ratio moyen"])),
+        ("Part online moyenne", fmt_pct(global_kpi["Part online moyenne"])),
+        ("Réclamants (%)", fmt_pct(global_kpi["Réclamants (%)"])),
+    ]
+    print_kv_table("KPI GLOBAUX", rows_global, width=width)
+
+    # Bloc Campagne
+    rows_campagne = [
+        ("Conv TRT", fmt_pct(campagne_kpi["Conv TRT"])),
+        ("Conv CTL", fmt_pct(campagne_kpi["Conv CTL"])),
+        ("Uplift absolu", fmt_pct(campagne_kpi["Uplift absolu"])),
+        ("Uplift relatif", fmt_pct(campagne_kpi["Uplift relatif"]) if not math.isnan(campagne_kpi["Uplift relatif"]) else "-"),
+        ("Δ Revenu moyen / client", fmt_num(campagne_kpi["Δ Revenu moyen/cliente"], 2)),
+        ("Incrément total (≈)", fmt_num(campagne_kpi["Incrément total (≈)"], 2)),
+        ("Acheteurs TRT (#)", fmt_num(campagne_kpi["Acheteurs TRT (#)"], 0)),
+        ("CPA", fmt_num(campagne_kpi["CPA (si coût>0)"], 2) if not math.isnan(campagne_kpi["CPA (si coût>0)"]) else "-"),
+        ("ROI incrémental", fmt_pct(campagne_kpi["ROI incrémental"]) if not math.isnan(campagne_kpi["ROI incrémental"]) else "-"),
+    ]
+    print_kv_table("KPI CAMPAGNE / EXPÉRIMENTATION", rows_campagne, width=width)
+
+    # Top valeur & Risque
+    headers_top = ["Identifiant","CLV_lite","Spend","Freq","AOV","Part_online","Promo_ratio"]
+    rows_top = [
+        [
+            int(r.Identifiant) if not pd.isna(r.Identifiant) else "-",
+            fmt_num(r.CLV_lite,2),
+            fmt_num(r.Spend_total,2),
+            fmt_num(r.Freq,2),
+            fmt_num(r.AOV,2),
+            fmt_pct(r.Part_online),
+            fmt_pct(r.Promo_ratio)
+        ]
+        for _, r in top_val.iterrows()
+    ]
+    print_table("TOP 5 CLIENTS PAR CLV (LITE)", headers_top, rows_top, width=width)
+
+    headers_risk = ["Identifiant","Recency_j","Spend","Freq","Part_online"]
+    rows_risk = [
+        [
+            int(r.Identifiant) if not pd.isna(r.Identifiant) else "-",
+            fmt_num(r.Recency_j,0),
+            fmt_num(r.Spend_total,2),
+            fmt_num(r.Freq,2),
+            fmt_pct(r.Part_online)
+        ]
+        for _, r in risques.iterrows()
+    ]
+    print_table("TOP 5 À RISQUE (RECENCY ÉLEVÉE)", headers_risk, rows_risk, width=width)
+
+    # Mini synthèse actionnable
+    synth = [
+        "• Priorités : améliorer Conv TRT vs CTL, réduire Promo_ratio si érosion marge, stimuler réachat (Recency).",
+        "• Ciblage : exploiter TOP CLV pour cross-sell premium, relancer clients à risque avec offre non-promo.",
+        "• Canal : si Part_online faible, tester parcours web/app et incentives non monétaires."
+    ]
+    print(_box("SYNTHÈSE ACTIONNABLE (RÉSUMÉ)", synth, width=width))
 
 if __name__ == "__main__":
     main()
