@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 
 data = pd.read_csv("csv/Camp_Market.csv", sep=';')
 
-
+#Data Cleaning
 data = data[~data['Marital_Status'].isin(['YOLO', 'Absurd'])]
 data = data.replace({'Marital_Status': {'Alone': 'Single'}})
 
