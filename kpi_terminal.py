@@ -76,6 +76,7 @@ def safe_div(a, b):
         return float("nan")
 
 def print_kv_table(title, rows, width=80, key_w=34):
+    # rows: list of (label, value_str)
     lines = []
     for k, v in rows:
         k = str(k); v = str(v)
@@ -119,12 +120,16 @@ def print_table(title, headers, rows, width=80, col_w=None):
 # ---------- Nettoyage & conversions ----------
 
 def ensure_numeric(df, cols):
+    """
+    Force les colonnes indiquées en float.
+    Gère les virgules décimales, espaces, symboles monétaires, etc.
+    """
     for c in cols:
         if c not in df.columns:
             continue
         s = df[c].astype(str)
-        s = s.str.replace(",", ".", regex=False)
-        s = s.str.replace(r'[^0-9\.\-eE+]', '', regex=True)
+        s = s.str.replace(",", ".", regex=False)                 # virgules -> points
+        s = s.str.replace(r'[^0-9\.\-eE+]', '', regex=True)      # enlève tout sauf 0-9 . - e E +
         df[c] = pd.to_numeric(s, errors="coerce")
     return df
 
@@ -138,6 +143,11 @@ def iqr_outlier_mask(series):
     return (series < low) | (series > high)
 
 def reliability_score(metrics):
+    """
+    Combine quelques signaux en un score 0-100 (simple, heuristique).
+    metrics dict keys:
+      coverage, bad_dates_pct, dup_ids, zero_freq_pct, outlier_pct
+    """
     score = 100.0
     score -= max(0, (1 - metrics["coverage"])) * 30.0
     score -= min(30.0, metrics["bad_dates_pct"] * 100 * 0.5)
@@ -149,6 +159,7 @@ def reliability_score(metrics):
 # ---------- KPI principaux (sans groupe) + Campagnes ----------
 
 def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
+    # Colonnes attendues (FR)
     required = [
         "Identifiant","Année_naissance","Education","Situation_matrimoniale","Revenu",
         "Enfant_charge","Ado_charge","Date_acquisition_client","Nombre_jours_depuis_dernier_achat",
@@ -160,9 +171,11 @@ def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
     present = [c for c in required if c in df.columns]
     coverage = len(present) / len(required)
 
+    # Dates
     if "Date_acquisition_client" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["Date_acquisition_client"]):
         df["Date_acquisition_client"] = pd.to_datetime(df["Date_acquisition_client"], errors="coerce")
 
+    # Force numérique
     numeric_cols = [
         "Identifiant","Année_naissance","Revenu","Enfant_charge","Ado_charge",
         "Nombre_jours_depuis_dernier_achat","Nb_achats_promo","Nb_achats_en_ligne",
@@ -173,9 +186,11 @@ def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
     ]
     df = ensure_numeric(df, numeric_cols)
 
+    # Nettoyage basique
     if "Response" in df.columns:
         df["Response"] = df["Response"].fillna(0).astype(float)
 
+    # Calculs de base
     today = pd.Timestamp.today().normalize()
     if "Année_naissance" in df.columns:
         df["Age"] = (today.year - df["Année_naissance"]).astype(float)
@@ -194,6 +209,7 @@ def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
     df["Freq"] = df[purch_cols].sum(axis=1)
     df["AOV"] = df["Spend_total"] / df["Freq"].replace(0, np.nan)
 
+    # Mix canal & catégories
     df["Part_online"]    = df["Nb_achats_en_ligne"] / df["Freq"].replace(0, np.nan)
     df["Part_magasin"]   = df["Achats_magasin"] / df["Freq"].replace(0, np.nan)
     df["Part_catalogue"] = df["Achats_catalogue"] / df["Freq"].replace(0, np.nan)
@@ -202,15 +218,18 @@ def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
         if col in df.columns:
             df[f"Part_{cat}"] = df[col] / df["Spend_total"].replace(0, np.nan)
 
+    # Cross-sell & promo
     if spend_cols:
         df["Cross_sell"] = (df[spend_cols] > 0).sum(axis=1) / len(spend_cols)
     else:
         df["Cross_sell"] = np.nan
     df["Promo_ratio"] = df["Nb_achats_promo"] / df["Freq"].replace(0, np.nan)
 
+    # Charges & réclamations
     df["Charge_index"] = df["Enfant_charge"] + df["Ado_charge"]
     df["Has_claim"] = (df["Reclamation_client"] > 0).astype(int)
 
+    # CLV (lite)
     df["Tenure_annees"] = (df.get("Tenure_j", pd.Series(np.nan, index=df.index)) / 365).clip(lower=1/12)
     df["Freq_par_an"] = df["Freq"] / df["Tenure_annees"]
     df["CLV_lite"] = df["AOV"] * df["Freq_par_an"] * float(marge) * float(horizon)
@@ -266,11 +285,12 @@ def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
     camp_cols = [c for c in ["Accepte_Campagne_1","Accepte_Campagne_2","Accepte_Campagne_3","Accepte_Campagne_4","Accepte_Campagne_5"] if c in df.columns]
     camp_rows = []
     for c in camp_cols:
-        k = int(c.split("_")[-1])
+        k = int(c.split("_")[-1])  # numéro de campagne
         acc = df[c].fillna(0).astype(int)
         n_accept = int(acc.sum())
         rate = float(acc.mean()) if len(acc) else float("nan")
 
+        # CA & comportements des acceptants (proxy : dépenses totales observées sur la période)
         mask = acc == 1
         ca_total_accept = float(df.loc[mask, "Spend_total"].sum())
         ca_moy_accept = float(df.loc[mask, "Spend_total"].mean()) if n_accept > 0 else float("nan")
@@ -278,6 +298,8 @@ def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
 
         freq_acc = float(df.loc[mask, "Freq"].mean()) if n_accept > 0 else float("nan")
         aov_acc  = float(df.loc[mask, "AOV"].mean())  if n_accept > 0 else float("nan")
+
+        # Optionnel : lien avec la réponse finale (si présent)
         resp_acc = float(df.loc[mask, "Response"].mean()) if "Response" in df.columns and n_accept > 0 else float("nan")
 
         camp_rows.append({
@@ -299,6 +321,7 @@ def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
     top_val = df.nlargest(5, "CLV_lite")[["Identifiant","CLV_lite","Spend_total","Freq","AOV","Part_online","Promo_ratio"]]
     risques = df.sort_values("Recency_j", ascending=False).head(5)[["Identifiant","Recency_j","Spend_total","Freq","Part_online"]]
 
+    # Pack résultats
     quality = {
         "coverage": coverage,
         "bad_dates_pct": bad_dates_pct,
@@ -328,6 +351,7 @@ def main():
         print(f"Erreur de lecture CSV: {e}")
         sys.exit(1)
 
+    # Calculs
     try:
         df_out, global_kpi, quality, ci, top_val, risques, camp_df = build_kpis(
             df,
@@ -341,6 +365,7 @@ def main():
 
     width = args.width
 
+    # Header
     header_lines = [
         f"Fichier : {args.file}",
         f"Date exécution : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -349,6 +374,7 @@ def main():
     print(_box("TABLEAU DE BORD KPI – TERMINAL (GLOBAL + CAMPAGNES)", header_lines, width=width))
     print()
 
+    # Qualité & fiabilité
     qual_lines = [
         f"Couverture colonnes clés           : {fmt_pct(quality['coverage'])}",
         f"Dates invalides                    : {fmt_pct(quality['bad_dates_pct'])}",
@@ -360,6 +386,7 @@ def main():
     print(_box("QUALITÉ DES DONNÉES & FIABILITÉ", qual_lines, width=width))
     print()
 
+    # KPI Globaux
     rows_global = [
         ("Clients (total)", fmt_num(global_kpi["Clients (total)"], 0)),
         ("Taux de réponse (global)", fmt_pct(global_kpi["Taux de réponse (global)"])),
@@ -373,6 +400,7 @@ def main():
     ]
     print_kv_table("KPI GLOBAUX (SANS TRT/CTL)", rows_global, width=width)
 
+    # IC95% global
     ic_lines = [
         f"Taux de réponse (global) : {fmt_pct(ci['p'])}  (IC95% {fmt_pct(ci['low'])} ; {fmt_pct(ci['high'])})",
         f"Taille d'échantillon (n) : {fmt_num(ci['n'], 0)}",
@@ -380,6 +408,7 @@ def main():
     print(_box("CONFIANCE STATISTIQUE (IC 95%) — TAUX GLOBAL", ic_lines, width=width))
     print()
 
+    # ---------- Tableau campagnes ----------
     if not camp_df.empty:
         headers_c = [
             "Campagne","Taux_acceptation","Acceptants",
@@ -401,6 +430,7 @@ def main():
             ])
         print_table("KPI PAR CAMPAGNE (HISTORIQUE)", headers_c, rows_c, width=width)
 
+        # Synthèse "meilleure" campagne selon critères
         best_rate = camp_df.sort_values("Taux_acceptation", ascending=False).iloc[0]
         best_ca   = camp_df.sort_values("CA_total_acceptants", ascending=False).iloc[0]
         best_cam_lines = [
@@ -415,6 +445,7 @@ def main():
         print(_box("KPI PAR CAMPAGNE (HISTORIQUE)", ["Colonnes Accepte_Campagne_1..5 absentes."], width=width))
         print()
 
+    # Top valeur & Risque
     headers_top = ["Identifiant","CLV_lite","Spend","Freq","AOV","Part_online","Promo_ratio"]
     rows_top = [
         [
@@ -428,7 +459,7 @@ def main():
         ]
         for _, r in top_val.iterrows()
     ]
-    print_table("TOP 5 CLIENTS PAR CLV (LITE)", headers_top, rows_top, width=width)
+    print_table("TOP 5 CLIENTS PAR CLV (LITE)", headers_top, rows_top, width=width))
 
     headers_risk = ["Identifiant","Recency_j","Spend","Freq","Part_online"]
     rows_risk = [
@@ -443,6 +474,7 @@ def main():
     ]
     print_table("TOP 5 À RISQUE (RECENCY ÉLEVÉE)", headers_risk, rows_risk, width=width)
 
+    # Mini synthèse actionnable
     synth = [
         "• Accélérer la meilleure campagne (haut taux ou haut CA) et répliquer ses leviers.",
         "• Tester des optimisations sur les campagnes faibles (créa, ciblage, canal).",
