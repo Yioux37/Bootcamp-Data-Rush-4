@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 
 
 
-data = pd.read_csv("csv/Camp_Market.csv", sep=';')
+data = pd.read_csv("Bootcamp-Data-Rush-4/csv/Camp_Market.csv", sep=';')
 
 #Data Cleaning
 data = data[~data['Marital_Status'].isin(['YOLO', 'Absurd'])]
@@ -51,7 +51,6 @@ data['Total_Accepted_Campaigns'] = data[accepted_cols].sum(axis=1)
 
 data['Has_Accepted_Before'] = (data['Total_Accepted_Campaigns'] > 0).astype(int)
 
-data.to_csv("csv/Cleaned_Camp_Market.csv", index=False)
 
 X = data.drop(columns=["Response"])
 y = data["Response"]
