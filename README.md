@@ -1,7 +1,5 @@
-
 # Campagne_Market – Analyse marketing & segmentation client (README)
 
-> **TL;DR**  
 > Projet data-marketing (6 jours, équipe de 5) sous **Python + Jupyter** pour :  
 > 1) **Mesurer l’efficacité des campagnes** (KPIs + ROI),  
 > 2) **Segmenter la clientèle** (clustering),  
