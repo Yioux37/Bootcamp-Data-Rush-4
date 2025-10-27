@@ -14,7 +14,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-# ------------------ utils ------------------
+# utils
 
 def ensure_numeric(df: pd.DataFrame, cols):
     """Force cols en float (gère virgules décimales, espaces, symboles)."""
@@ -35,7 +35,7 @@ def safe_div(num, den):
     except Exception:
         return np.nan
 
-# ------------------ mapping colonnes ------------------
+# mapping colonnes
 # Le script accepte deux schémas :
 # - EN (Kaggle/Portugal) : MntWines, MntFruits, ..., NumWebPurchases, Income, etc.
 # - FR (ton CSV) : Montant_vin, Montant_fruits, ..., Nb_achats_en_ligne, Revenu, etc.
@@ -98,7 +98,7 @@ def pick_schema(df: pd.DataFrame):
             best_score = score
     return best
 
-# ------------------ core ------------------
+# core
 
 def engineer_features(df: pd.DataFrame, ref_year: int = 2014) -> pd.DataFrame:
     m = pick_schema(df)
@@ -172,7 +172,7 @@ def engineer_features(df: pd.DataFrame, ref_year: int = 2014) -> pd.DataFrame:
 
     return df
 
-# ------------------ CLI ------------------
+# CLI
 
 def main():
     p = argparse.ArgumentParser(description="Création d'indicateurs (feature engineering)")

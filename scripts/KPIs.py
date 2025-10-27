@@ -17,7 +17,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-# ---------- Helpers d'affichage (ASCII/Unicode, aucune dépendance externe) ----------
+# Helpers d'affichage (ASCII/Unicode, aucune dépendance externe)
 
 USE_UNICODE = sys.stdout.encoding and "UTF" in sys.stdout.encoding.upper()
 
@@ -116,7 +116,7 @@ def print_table(title, headers, rows, width=80, col_w=None):
     print(_box(title, lines, width=width))
     print()
 
-# ---------- Nettoyage & conversions ----------
+# Nettoyage & conversions
 
 def ensure_numeric(df, cols):
     for c in cols:
@@ -128,7 +128,7 @@ def ensure_numeric(df, cols):
         df[c] = pd.to_numeric(s, errors="coerce")
     return df
 
-# ---------- Indicateurs de qualité & fiabilité ----------
+# Indicateurs de qualité & fiabilité
 
 def iqr_outlier_mask(series):
     q1, q3 = np.nanpercentile(series, [25, 75])
@@ -146,7 +146,7 @@ def reliability_score(metrics):
     score -= min(20.0, metrics["outlier_pct"] * 100 * 0.5)
     return max(0.0, min(100.0, score))
 
-# ---------- KPI principaux (sans groupe) + Campagnes ----------
+# KPI principaux + Campagnes
 
 def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
     required = [
@@ -215,7 +215,7 @@ def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
     df["Freq_par_an"] = df["Freq"] / df["Tenure_annees"]
     df["CLV_lite"] = df["AOV"] * df["Freq_par_an"] * float(marge) * float(horizon)
 
-    # ---------- Qualité & Fiabilité ----------
+    # Qualité & Fiabilité
     n_total = len(df)
     bad_dates_pct = float(df["Date_acquisition_client"].isna().mean()) if "Date_acquisition_client" in df.columns else 1.0
     dup_ids = int(df["Identifiant"].duplicated().sum()) if "Identifiant" in df.columns else 0
@@ -236,7 +236,7 @@ def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
                  "Moyenne" if score_rel >= 60 else
                  "Faible")
 
-    # ---------- KPI Globaux ----------
+    # KPI Globaux
     global_kpi = {
         "Clients (total)": n_total,
         "Taux de réponse (global)": float(df["Response"].mean()) if "Response" in df.columns else float("nan"),
@@ -249,7 +249,7 @@ def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
         "Réclamants (%)": float(df["Has_claim"].mean()),
     }
 
-    # ---------- IC95% pour le taux de réponse global (Wilson) ----------
+    # IC95% pour le taux de réponse global (Wilson)
     def wilson_ci(p, n, z=1.96):
         if n == 0 or p != p:
             return (float("nan"), float("nan"))
@@ -262,7 +262,7 @@ def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
     n = n_total
     ci_low, ci_high = wilson_ci(p, n)
 
-    # ---------- Campagnes 1..5 ----------
+    #  Campagnes 1..5 
     camp_cols = [c for c in ["Accepte_Campagne_1","Accepte_Campagne_2","Accepte_Campagne_3","Accepte_Campagne_4","Accepte_Campagne_5"] if c in df.columns]
     camp_rows = []
     for c in camp_cols:
@@ -294,7 +294,7 @@ def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
 
     camp_df = pd.DataFrame(camp_rows).sort_values(["Taux_acceptation","CA_total_acceptants"], ascending=[False, False]) if camp_rows else pd.DataFrame()
 
-    # ---------- Segments ----------
+    # Segments 
     df["CLV_lite"] = pd.to_numeric(df["CLV_lite"], errors="coerce").fillna(0.0)
     top_val = df.nlargest(5, "CLV_lite")[["Identifiant","CLV_lite","Spend_total","Freq","AOV","Part_online","Promo_ratio"]]
     risques = df.sort_values("Recency_j", ascending=False).head(5)[["Identifiant","Recency_j","Spend_total","Freq","Part_online"]]
@@ -311,7 +311,7 @@ def build_kpis(df, cout_campagne=0.0, marge=0.30, horizon=2.0):
     ci = {"p": p, "n": n, "low": ci_low, "high": ci_high}
     return df, global_kpi, quality, ci, top_val, risques, camp_df
 
-# ---------- Main ----------
+# Main 
 
 def main():
     parser = argparse.ArgumentParser(description="KPIs marketing – rendu terminal soigné (sans groupes) + analyse campagnes")

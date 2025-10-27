@@ -14,7 +14,7 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 
-# Helpers terminal (ascii/utf-8) 
+# Helpers terminal
 
 USE_UNICODE = sys.stdout.encoding and "UTF" in sys.stdout.encoding.upper()
 
@@ -71,7 +71,7 @@ def print_kv_table(title, rows, width=96, key_w=38):
     print(_box(title, lines, width=width))
     print()
 
-#  Lecture + Features FR (auto) 
+# Lecture + Features FR (auto)
 
 def ensure_features(df):
     """
