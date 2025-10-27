@@ -138,55 +138,6 @@ new_clients = pd.DataFrame([
      "MntFishProducts": 300, "MntSweetProducts": 250, "MntGoldProds": 400,
      "Total_Accepted_Campaigns": 4},
 
-    {"Year_Birth": 1980, "Education": "Master", "Marital_Status": "Together", "Income": 95000,
-     "Kidhome": 1, "Teenhome": 0, "Recency": 5,
-     "MntWines": 900, "MntFruits": 80, "MntMeatProducts": 1100,
-     "MntFishProducts": 200, "MntSweetProducts": 120, "MntGoldProds": 250,
-     "Total_Accepted_Campaigns": 3},
-
-    {"Year_Birth": 1975, "Education": "Graduation", "Marital_Status": "Married", "Income": 88000,
-     "Kidhome": 2, "Teenhome": 0, "Recency": 4,
-     "MntWines": 800, "MntFruits": 70, "MntMeatProducts": 1000,
-     "MntFishProducts": 150, "MntSweetProducts": 110, "MntGoldProds": 200,
-     "Total_Accepted_Campaigns": 2},
-
-    {"Year_Birth": 1968, "Education": "PhD", "Marital_Status": "Married", "Income": 120000,
-     "Kidhome": 0, "Teenhome": 0, "Recency": 1,
-     "MntWines": 1500, "MntFruits": 150, "MntMeatProducts": 1800,
-     "MntFishProducts": 250, "MntSweetProducts": 300, "MntGoldProds": 500,
-     "Total_Accepted_Campaigns": 5},
-
-    {"Year_Birth": 1983, "Education": "Master", "Marital_Status": "Together", "Income": 98000,
-     "Kidhome": 1, "Teenhome": 1, "Recency": 3,
-     "MntWines": 1000, "MntFruits": 120, "MntMeatProducts": 1300,
-     "MntFishProducts": 220, "MntSweetProducts": 150, "MntGoldProds": 300,
-     "Total_Accepted_Campaigns": 3},
-
-    # 🔴 Extremely unlikely to respond
-    {"Year_Birth": 1998, "Education": "Basic", "Marital_Status": "Single", "Income": 12000,
-     "Kidhome": 0, "Teenhome": 0, "Recency": 90,
-     "MntWines": 5, "MntFruits": 2, "MntMeatProducts": 10,
-     "MntFishProducts": 1, "MntSweetProducts": 1, "MntGoldProds": 0,
-     "Total_Accepted_Campaigns": 0},
-
-    {"Year_Birth": 1989, "Education": "2n Cycle", "Marital_Status": "Single", "Income": 20000,
-     "Kidhome": 0, "Teenhome": 0, "Recency": 85,
-     "MntWines": 10, "MntFruits": 3, "MntMeatProducts": 15,
-     "MntFishProducts": 2, "MntSweetProducts": 1, "MntGoldProds": 0,
-     "Total_Accepted_Campaigns": 0},
-
-    {"Year_Birth": 1995, "Education": "Basic", "Marital_Status": "Single", "Income": 18000,
-     "Kidhome": 1, "Teenhome": 1, "Recency": 100,
-     "MntWines": 0, "MntFruits": 0, "MntMeatProducts": 5,
-     "MntFishProducts": 0, "MntSweetProducts": 0, "MntGoldProds": 0,
-     "Total_Accepted_Campaigns": 0},
-
-    {"Year_Birth": 1987, "Education": "Graduation", "Marital_Status": "Divorced", "Income": 25000,
-     "Kidhome": 2, "Teenhome": 1, "Recency": 70,
-     "MntWines": 15, "MntFruits": 2, "MntMeatProducts": 20,
-     "MntFishProducts": 5, "MntSweetProducts": 3, "MntGoldProds": 1,
-     "Total_Accepted_Campaigns": 0},
-
     {"Year_Birth": 2000, "Education": "Basic", "Marital_Status": "Single", "Income": 10000,
      "Kidhome": 0, "Teenhome": 0, "Recency": 95,
      "MntWines": 0, "MntFruits": 0, "MntMeatProducts": 0,
@@ -207,7 +158,7 @@ predictions = forest.predict(new_clients_scaled)
 probabilities = forest.predict_proba(new_clients_scaled)[:, 1]
 
 results = pd.DataFrame({
-    "Client": range(1, 11),
+    "Client": range(1, 3),
     "Predicted_Response": predictions,
     "Response_Probability": probabilities
 })
